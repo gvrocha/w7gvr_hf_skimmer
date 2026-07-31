@@ -1,0 +1,11 @@
+{
+  "band": "20m",
+  "mode": "wspr",
+  "dial_frequency": "14.095M",
+  "sdr_device": "rtl_sdr",
+  "gain": "40",
+  "sample_rate": "12000",
+  "decoder": "wsjtx",
+  "decoder_path": "vendor/wsjtx/build/wsprd",
+  "listening": false
+}

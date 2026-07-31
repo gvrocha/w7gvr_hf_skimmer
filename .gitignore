@@ -1,0 +1,14 @@
+.DS_Store
+.claude/
+__pycache__/
+*.pyc
+.venv/
+
+# Runtime output — created on first run
+logs/
+sessions/
+data_collected/
+
+# Local overrides
+config/*.json
+!config/*.json.example

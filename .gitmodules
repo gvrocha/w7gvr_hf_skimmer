@@ -1,0 +1,6 @@
+[submodule "vendor/ft8_lib"]
+	path = vendor/ft8_lib
+	url = https://github.com/kgoba/ft8_lib.git
+[submodule "vendor/wsjtx"]
+	path = vendor/wsjtx
+	url = https://github.com/WSJTX/wsjtx.git
