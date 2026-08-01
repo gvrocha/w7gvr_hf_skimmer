@@ -74,7 +74,8 @@ Rough sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidt
 | `bin/` | Arch-dispatch wrapper scripts (`jt9`, `wsprd`, `decode_ft8`) — resolve `$(uname -s)-$(uname -m)` and exec the matching build under `vendor/*/build-<platform>/`; see `bin/_platform.sh` |
 | `tools/` | Standalone analysis/query scripts (future) |
 | `planning/` | Implementation plan and design notes |
-| `vendor/` | Pinned git submodules: `wsjtx` (real build dependency, provides `jt9`/`wsprd`) and `ft8_lib` (alternative FT8/FT4 decoder) |
+| `hardware/` | Dated hardware bring-up session logs (GPS, SDR, etc.) — hard-won operational notes, not idealized procedures |
+| `vendor/` | Pinned git submodules: `wsjtx` (real build dependency, provides `jt9`/`wsprd`), `ft8_lib` (alternative FT8/FT4 decoder), `minimal_pi` (reusable "blank SD card → headless SSH" base image, scoped to OS/first-boot only — app-specific hardware setup like GPS lives in this project's own `hardware/`, not there) |
 | `logs/` | Runtime logs, gitignored, created on first run |
 | `sessions/` | Session-stamped decode logs, gitignored, created on first run |
 
