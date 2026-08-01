@@ -75,10 +75,11 @@ Sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidth) —
   "gain": "40",
   "sample_rate": "12000",
   "decoder": "wsjtx",
-  "decoder_path": "vendor/wsjtx/build/wsprd",
   "listening": false
 }
 ```
+
+`decoder` (`"wsjtx"` or `"ft8_lib"`) plus `mode` together fully determine which `bin/` wrapper (`jt9`, `wsprd`, or `decode_ft8`) and CLI flags to use — see `decode_worker.DECODERS` — so there is no separate `decoder_path` key to keep in sync by hand.
 
 Common dial frequencies by band appear in `planning/implementation_plan.md`. Static vs runtime-mutable key split should follow `mobile_aprs_gateway`'s `config.json` convention once `hsd` exists.
 

@@ -47,7 +47,7 @@ Two decode engines are vendored as git submodules under `vendor/`:
 | `jt9` / `wsprd` | FT8, FT4, WSPR | `vendor/wsjtx` ([WSJTX/wsjtx](https://github.com/WSJTX/wsjtx.git)) | Reference implementation. `jt9` runs multi-pass subtraction decoding (up to 3 cycles × 3 passes) plus 6 modes of a priori (AP) decoding — best decode yield on a busy band. |
 | `decode_ft8` | FT8, FT4 | `vendor/ft8_lib` ([kgoba/ft8_lib](https://github.com/kgoba/ft8_lib.git)) | Lightweight reimplementation designed for embedded targets (runs on an STM32F7 in <200KB RAM). No documented subtraction/AP decoding — lower expected yield on crowded bands, but a much smaller footprint. Does not support WSPR. |
 
-Decoder choice is a config setting (`decoder` / `decoder_path`), so `jt9` and `ft8_lib` can be A/B compared on the same captured WAV files before committing to one.
+Decoder choice is a config setting (`decoder`, combined with `mode`), so `jt9` and `ft8_lib` can be A/B compared on the same captured WAV files before committing to one.
 
 Rough sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidth), for context: WSPR ≈ −28 dB SNR, FT8 ≈ −20.8 dB, FT4 ≈ −17.5 dB. WSPR's narrowband/long-integration design makes it dramatically more sensitive than FT8/FT4, at the cost of a 2-minute cycle instead of 15s/7.5s.
 
@@ -68,7 +68,8 @@ Rough sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidt
 
 | Path | What's there |
 |---|---|
-| `src/` | Daemon and CLI source (capture daemon, decode daemon, `hsd`, `hsctl`) — not yet implemented |
+| `src/` | Daemon and CLI source. `decode_worker.py` (decoder subprocess invocation + stdout parsing + directory-watch) is implemented; `hsd.py`/`hsctl.py`/`capture_worker.py`/`gps_clock.py` not yet |
+| `tests/` | `unittest`-based tests, run via `PYTHONPATH=src python3 -m unittest discover tests -v`; some are skipped unless the external `wsjtx_hacks` sample corpus is present on the machine |
 | `config/` | `config.json.example` — band/mode/decoder selection |
 | `bin/` | Arch-dispatch wrapper scripts (`jt9`, `wsprd`, `decode_ft8`) — resolve `$(uname -s)-$(uname -m)` and exec the matching build under `vendor/*/build-<platform>/`; see `bin/_platform.sh` |
 | `tools/` | Standalone analysis/query scripts (future) |
@@ -85,7 +86,7 @@ Rough sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidt
 git submodule update --init --recursive
 ```
 
-Build `jt9`/`wsprd` from the vendored WSJT-X source, and/or `decode_ft8` from `vendor/ft8_lib`, then invoke them via the `bin/` wrapper scripts rather than the raw build paths — this keeps `decoder_path` in `config.json` valid across hosts with different OS/arch (see `bin/_platform.sh`).
+Build `jt9`/`wsprd` from the vendored WSJT-X source, and/or `decode_ft8` from `vendor/ft8_lib`, then invoke them via the `bin/` wrapper scripts rather than the raw build paths — this keeps decoder invocation valid across hosts with different OS/arch (see `bin/_platform.sh`). `src/decode_worker.py`'s `DECODERS` table maps `(decoder, mode)` straight to the right `bin/` wrapper and CLI flags, so `config.json` only needs `decoder`/`mode`, not a separate path.
 
 ```sh
 # jt9 / wsprd (macOS example — qt@5 is keg-only, needs CMAKE_PREFIX_PATH)

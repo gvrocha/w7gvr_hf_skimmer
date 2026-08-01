@@ -8,6 +8,7 @@ __pycache__/
 logs/
 sessions/
 data_collected/
+var/
 
 # Local overrides
 config/*.json
