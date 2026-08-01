@@ -70,6 +70,7 @@ Rough sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidt
 |---|---|
 | `src/` | Daemon and CLI source (capture daemon, decode daemon, `hsd`, `hsctl`) — not yet implemented |
 | `config/` | `config.json.example` — band/mode/decoder selection |
+| `bin/` | Arch-dispatch wrapper scripts (`jt9`, `wsprd`, `decode_ft8`) — resolve `$(uname -s)-$(uname -m)` and exec the matching build under `vendor/*/build-<platform>/`; see `bin/_platform.sh` |
 | `tools/` | Standalone analysis/query scripts (future) |
 | `planning/` | Implementation plan and design notes |
 | `vendor/` | Pinned git submodules: `wsjtx` (real build dependency, provides `jt9`/`wsprd`) and `ft8_lib` (alternative FT8/FT4 decoder) |
@@ -84,7 +85,25 @@ Rough sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidt
 git submodule update --init --recursive
 ```
 
-Build `jt9`/`wsprd` from the vendored WSJT-X source, and/or `decode_ft8` from `vendor/ft8_lib`, per their respective build instructions.
+Build `jt9`/`wsprd` from the vendored WSJT-X source, and/or `decode_ft8` from `vendor/ft8_lib`, then invoke them via the `bin/` wrapper scripts rather than the raw build paths — this keeps `decoder_path` in `config.json` valid across hosts with different OS/arch (see `bin/_platform.sh`).
+
+```sh
+# jt9 / wsprd (macOS example — qt@5 is keg-only, needs CMAKE_PREFIX_PATH)
+cmake -S vendor/wsjtx -B vendor/wsjtx/build-darwin-arm64 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="$(brew --prefix qt@5)" \
+  -DWSJT_SKIP_MAP65=ON -DWSJT_BUILD_UTILS=OFF -DWSJT_BUILD_TESTS=OFF \
+  -DWSJT_SKIP_MANPAGES=ON -DWSJT_GENERATE_DOCS=OFF
+cmake --build vendor/wsjtx/build-darwin-arm64 --target jt9 --target wsprd -j
+
+# decode_ft8 (macOS: Apple's libc hides snprintf's declaration under
+# _POSIX_C_SOURCE without _DARWIN_C_SOURCE — pass it explicitly)
+make -C vendor/ft8_lib CFLAGS="-O3 -DHAVE_STPCPY -D_DARWIN_C_SOURCE -I." decode_ft8
+mkdir -p vendor/ft8_lib/build-darwin-arm64
+mv vendor/ft8_lib/decode_ft8 vendor/ft8_lib/build-darwin-arm64/
+```
+
+Build output lands in `vendor/*/build-<platform>/` (gitignored, per-host) — the `bin/jt9`, `bin/wsprd`, `bin/decode_ft8` wrappers dispatch to whichever platform directory matches the current host.
 
 **Note on Pi 3 B+:** building WSJT-X from source (Qt5 + Fortran DSP code) is a much heavier job than running it — plan to cross-build on the Pi 5 or a dev machine and copy the resulting `jt9`/`wsprd` binaries over, rather than compiling on a 1GB-RAM Pi 3 B+.
 

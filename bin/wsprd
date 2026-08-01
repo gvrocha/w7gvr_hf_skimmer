@@ -1,0 +1,3 @@
+#!/bin/sh
+. "$(dirname "$0")/_platform.sh"
+decoder_bin wsjtx wsprd "$@"

@@ -38,7 +38,7 @@ Add `jt9 -8` as a second mode option. Chosen over `ft8_lib` to start with, since
 **Exit criterion:** decode yield sanity-checked against a live band session (rough signal count matches expectation for time of day/band conditions).
 
 ### Phase 4 — FT4 decode path
-Same binary (`jt9 -4`), different cadence (7.5s). Should be a small delta on top of Phase 3's plumbing.
+Same binary (`jt9 -5`/`--ft4`), different cadence (7.5s). Note: `-4`/`--jt4` is the older JT4 mode, not FT4 — confirmed against `jt9 --help` output, this plan previously had the flag wrong. Should be a small delta on top of Phase 3's plumbing.
 
 ### Phase 5 — IPC + CLI
 Unix socket (`hsd.sock`), line-delimited JSON protocol (reuse `magd.sock`'s shape, don't redesign it). `hsctl start/stop/status/monitor`, mirroring `magctl`'s command surface. This is the layer that makes the "services other applications can be built on" goal real.

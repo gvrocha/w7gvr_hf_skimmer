@@ -12,3 +12,12 @@ data_collected/
 # Local overrides
 config/*.json
 !config/*.json.example
+
+# Decoder build output — per-host, built via bin/ wrapper scripts
+vendor/wsjtx/build-*/
+vendor/ft8_lib/build-*/
+vendor/ft8_lib/decode_ft8
+vendor/ft8_lib/gen_ft8
+vendor/ft8_lib/libft8.a
+vendor/ft8_lib/test_ft8
+vendor/ft8_lib/.build/

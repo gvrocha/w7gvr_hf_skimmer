@@ -1,9 +1,11 @@
 [submodule "vendor/ft8_lib"]
 	path = vendor/ft8_lib
 	url = https://github.com/kgoba/ft8_lib.git
+	ignore = untracked
 [submodule "vendor/wsjtx"]
 	path = vendor/wsjtx
 	url = https://github.com/WSJTX/wsjtx.git
+	ignore = untracked
 [submodule "vendor/minimal_pi"]
 	path = vendor/minimal_pi
 	url = https://github.com/gvrocha/minimal_pi.git

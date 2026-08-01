@@ -6,6 +6,6 @@
   "gain": "40",
   "sample_rate": "12000",
   "decoder": "wsjtx",
-  "decoder_path": "vendor/wsjtx/build/wsprd",
+  "decoder_path": "bin/wsprd",
   "listening": false
 }
