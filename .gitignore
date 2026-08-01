@@ -9,6 +9,9 @@ logs/
 sessions/
 data_collected/
 var/
+chunks/
+hsd.sock
+.hsd_log_counter
 
 # Local overrides
 config/*.json

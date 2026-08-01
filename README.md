@@ -68,7 +68,7 @@ Rough sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidt
 
 | Path | What's there |
 |---|---|
-| `src/` | Daemon and CLI source. `decode_worker.py` (decoder subprocess invocation + stdout parsing + directory-watch) is implemented; `hsd.py`/`hsctl.py`/`capture_worker.py`/`gps_clock.py` not yet |
+| `src/` | Daemon and CLI source. `decode_worker.py`, `hsd.py` (core daemon), `hsctl.py` (CLI) implemented; `capture_worker.py`/`gps_clock.py` not yet — WAV chunks must be dropped into `chunks/` externally until then |
 | `tests/` | `unittest`-based tests, run via `PYTHONPATH=src python3 -m unittest discover tests -v`; some are skipped unless the external `wsjtx_hacks` sample corpus is present on the machine |
 | `config/` | `config.json.example` — band/mode/decoder selection |
 | `bin/` | Arch-dispatch wrapper scripts (`jt9`, `wsprd`, `decode_ft8`) — resolve `$(uname -s)-$(uname -m)` and exec the matching build under `vendor/*/build-<platform>/`; see `bin/_platform.sh` |
