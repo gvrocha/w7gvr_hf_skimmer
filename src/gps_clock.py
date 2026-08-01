@@ -7,21 +7,23 @@ as system-clock-now + offset, so one dropped fix doesn't stall
 timestamping -- it just free-runs on the last known offset until the next
 good fix corrects it.
 
-No real GPS receiver is available yet (tracked as Track B-GPS in the
-implementation plan). This module is built and unit-tested now against a
-stub GPS source; GpsdSource (the real gpsd-backed adapter below) is a
-faithful port of magd.py's gps.gps(mode=WATCH_ENABLE|WATCH_NEWSTYLE) call,
-but is unverified against real hardware until a receiver is on hand.
+Hardware-validated 2026-08-01 against a real u-blox 7 GPS/GNSS receiver
+(the same model mobile_aprs_gateway uses) on macOS: gpsd has no bundled
+Python bindings on this platform (Homebrew's gpsd formula ships none, and
+there's no "gps" package reliably available via pip either), so GpsdSource
+talks to gpsd directly over its own JSON socket protocol (127.0.0.1:2947)
+using only stdlib socket/json -- confirmed working end-to-end, including
+the no-fix case (mode=1, no "time" field) tested indoors before a fix was
+acquired. This is also more portable to the Pi than depending on
+platform-specific bindings there too, since gpsd's wire protocol is
+identical everywhere gpsd itself runs.
 """
 
+import json
+import socket
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Protocol
-
-try:
-    import gps as _gpslib
-except ImportError:
-    _gpslib = None
 
 
 class GpsReport(Protocol):
@@ -36,16 +38,39 @@ class GpsSource(Protocol):
     def next(self) -> GpsReport: ...
 
 
-class GpsdSource:
-    """Adapts gpsd's own `gps` session object to GpsSource's .next() shape."""
+class _TpvReport:
+    def __init__(self, mode: int, time: Optional[str]):
+        self.mode = mode
+        self.time = time
 
-    def __init__(self):
-        if _gpslib is None:
-            raise RuntimeError("gpsd python bindings ('gps' module) not installed")
-        self._session = _gpslib.gps(mode=_gpslib.WATCH_ENABLE | _gpslib.WATCH_NEWSTYLE)
+
+class GpsdSource:
+    """Talks to gpsd over its own JSON socket protocol (default
+    127.0.0.1:2947), filtering for TPV (time-position-velocity) reports --
+    stdlib-only, no gpsd Python bindings required.
+    """
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 2947, timeout: float = 5.0):
+        self._sock = socket.create_connection((host, port), timeout=timeout)
+        self._sock.settimeout(timeout)
+        self._buf = b""
+        self._readline()  # discard gpsd's VERSION banner
+        self._sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
+
+    def _readline(self) -> dict:
+        while b"\n" not in self._buf:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("gpsd closed the connection")
+            self._buf += chunk
+        line, self._buf = self._buf.split(b"\n", 1)
+        return json.loads(line)
 
     def next(self) -> GpsReport:
-        return self._session.next()
+        while True:
+            obj = self._readline()
+            if obj.get("class") == "TPV":
+                return _TpvReport(mode=obj.get("mode", 0), time=obj.get("time"))
 
 
 class GpsClock:

@@ -4,9 +4,9 @@
 
 ## Where this stands right now
 
-No radio or GPS hardware on hand yet.
-Everything buildable without them is built and tested.
-`hsd`/`hsctl` already run end-to-end against WAV files dropped in manually — the only work left before live over-the-air spots is a small capture-worker integration step, plus the physical hardware itself (GPS puck, then RTL-SDR + HF antenna).
+No radio hardware on hand yet, but a real GPS unit (u-blox 7) has now been tested against this Mac.
+Everything else buildable without hardware is built and tested.
+`hsd`/`hsctl` already run end-to-end against WAV files dropped in manually — the remaining work before live over-the-air spots is a small capture-worker integration step, an outdoor GPS fix validation, and the RTL-SDR + HF antenna itself.
 
 ## Done
 
@@ -17,11 +17,12 @@ Everything buildable without them is built and tested.
 - [x] `src/gps_clock.py` — GPS-vs-system offset discipline, stub-tested
 - [x] `src/capture_worker.py` — UTC-aligned WAV chunking arithmetic, unit-tested standalone (plus a real-time integration test against a synthetic generator standing in for `rtl_fm`)
 - [x] 38 passing tests (`tests/`) — `PYTHONPATH=src python3 -m unittest discover tests -v`
+- [x] Track B-GPS, partial (2026-08-01): real u-blox 7 GPS unit confirmed alive (raw NMEA read directly off `/dev/cu.usbmodem1301`), `gpsd` brought up against it, and `GpsdSource` rewritten to talk to `gpsd`'s own JSON socket protocol directly (stdlib `socket`/`json` — no Python `gps` bindings exist for this platform). No-fix path (`mode=1`) validated end-to-end through `GpsClock` against the real device, both indoors and after ~3 minutes outside with only 0-2 satellites visible.
 
 ## In progress / next up
 
 - [ ] Wire `capture_worker.CaptureWorker` into `hsd.py`'s `start`/`stop` — WAV chunks currently have to be dropped into `chunks/` externally
-- [ ] Track B-GPS: source a GPS receiver, swap `gps_clock`'s stub source for the real `GpsdSource`, hardware-validate offset/fix-quality behavior
+- [ ] Track B-GPS, remaining: get a real 2D/3D fix (needs clearer sky view than was available this session) and validate the actual offset-computation math against it — only the no-fix path has real-hardware coverage so far
 - [ ] Track B-Radio: set up the RTL-SDR + HF antenna, swap the synthetic PCM generator for the real `rtl_fm` invocation, run the Phase 1 exit criterion (sustained multi-hour real-signal capture verified against UTC boundaries)
 
 ## Known gaps / open questions
@@ -29,6 +30,7 @@ Everything buildable without them is built and tested.
 - `build_rtl_fm_cmd()`'s exact argv (the USB-demod recipe) is unverified against real hardware.
 - `wsprd` is invoked without `-f` (no dial frequency), so its frequency field is baseband-relative Hz, consistent with `jt9`/`decode_ft8` — absolute RF frequency (dial + offset) isn't computed anywhere yet.
 - No cleanup/retention policy for processed WAV chunks in `chunks/` yet — they accumulate on disk indefinitely.
+- GPS offset math (the actual point of `gps_clock.py`) is only verified against the stub, not a real fix yet — the u-blox 7 couldn't get enough satellites (max 2 visible, 0 used) in the spot tried this session.
 
 ## Reference
 
