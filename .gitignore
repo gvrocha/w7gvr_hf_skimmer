@@ -25,3 +25,6 @@ vendor/ft8_lib/gen_ft8
 vendor/ft8_lib/libft8.a
 vendor/ft8_lib/test_ft8
 vendor/ft8_lib/.build/
+
+# Offline provisioning bundle — rebuildable via provisioning/build-bundle.sh
+provisioning/bundle/

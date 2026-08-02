@@ -75,6 +75,7 @@ Rough sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidt
 | `tools/` | Standalone analysis/query scripts (future) |
 | `planning/` | Implementation plan and design notes |
 | `hardware/` | Dated hardware bring-up session logs (GPS, SDR, etc.) — hard-won operational notes, not idealized procedures |
+| `provisioning/` | Gets a Pi already running `minimal_pi`'s baseline the rest of the way to running `hsd` — entirely offline, no internet assumed. `build-bundle.sh` (dev Mac, via Colima) cross-builds `jt9`/`wsprd`/`decode_ft8` for `linux-aarch64` and fetches+indexes a self-contained `apk` package bundle (`python3`, `gpsd`, `rtl-sdr`); `deploy.sh` rsyncs it all to the Pi; `install.sh` (run on the Pi) installs offline and registers the `hsd`/`gpsd` OpenRC services. `bundle/` is gitignored, rebuilt on demand |
 | `vendor/` | Pinned git submodules: `wsjtx` (real build dependency, provides `jt9`/`wsprd`), `ft8_lib` (alternative FT8/FT4 decoder), `minimal_pi` (reusable "blank SD card → headless SSH" base image, scoped to OS/first-boot only — app-specific hardware setup like GPS lives in this project's own `hardware/`, not there) |
 | `logs/` | Runtime logs, gitignored, created on first run |
 | `sessions/` | Session-stamped decode logs, gitignored, created on first run |

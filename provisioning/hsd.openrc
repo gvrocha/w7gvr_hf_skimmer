@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+# /etc/init.d/hsd
+# OpenRC init script for w7gvr_hf_skimmer's core daemon (hsd.py)
+# Manages: GPS-disciplined RF capture + decode pipeline + Unix socket IPC
+#
+# Runs as root -- minimal_pi's current setup only provisions root SSH
+# access (per its own README, extra users are explicitly out of its
+# scope). Revisit this once a dedicated non-root user exists.
+
+name="hsd"
+description="W7GVR HF skimmer daemon (capture + decode pipeline)"
+
+command="/usr/bin/python3"
+command_args="/root/w7gvr_hf_skimmer/src/hsd.py"
+command_background=true
+
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/root/w7gvr_hf_skimmer/logs/hsd_openrc.log"
+error_log="/root/w7gvr_hf_skimmer/logs/hsd_openrc.log"
+
+depend() {
+    need net
+    need gpsd
+    after localmount
+}
