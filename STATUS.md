@@ -1,12 +1,13 @@
 # STATUS.md
 
-**Last updated:** 2026-08-01
+**Last updated:** 2026-08-02
 
 ## Where this stands right now
 
 No radio hardware on hand yet, but a real GPS unit (u-blox 7) has now been tested against this Mac.
 Everything else buildable without hardware is built and tested — including a full offline Pi-provisioning pipeline (cross-built decoders + an offline `apk` bundle), not yet run against an actual Pi.
-`hsd`/`hsctl` already run end-to-end against WAV files dropped in manually — the remaining work before live over-the-air spots is a small capture-worker integration step, an outdoor GPS fix validation, a real Pi to provision, and the RTL-SDR + HF antenna itself.
+`hsd`'s `start`/`stop` now drive both `CaptureWorker` and `DecodeWorker` internally, wired only through the shared `chunks/` directory — WAV chunks no longer need to be dropped in manually.
+The remaining work before live over-the-air spots is an outdoor GPS fix validation, a real Pi to provision, and the RTL-SDR + HF antenna itself.
 
 ## Done
 
@@ -19,10 +20,10 @@ Everything else buildable without hardware is built and tested — including a f
 - [x] 38 passing tests (`tests/`) — `PYTHONPATH=src python3 -m unittest discover tests -v`
 - [x] Track B-GPS, partial (2026-08-01): real u-blox 7 GPS unit confirmed alive (raw NMEA read directly off `/dev/cu.usbmodem1301`), `gpsd` brought up against it, and `GpsdSource` rewritten to talk to `gpsd`'s own JSON socket protocol directly (stdlib `socket`/`json` — no Python `gps` bindings exist for this platform). No-fix path (`mode=1`) validated end-to-end through `GpsClock` against the real device, both indoors and after ~3 minutes outside with only 0-2 satellites visible.
 - [x] `provisioning/` — offline Pi provisioning, entirely no-internet-required (2026-08-01): Colima (Alpine 3.21 aarch64, native speed) set up sudo-free via plain user-owned binaries (no Homebrew write access on this machine). `jt9`/`wsprd`/`decode_ft8` cross-built for `linux-aarch64` and validated against real audio (decode results match the `darwin-arm64` builds exactly). A self-contained `apk` bundle (`python3`, `gpsd`, `gpsd-openrc`, `rtl-sdr`, 26 packages with a real `APKINDEX.tar.gz`) verified installable in a `--network none` container. `hsd.openrc` mirrors `mobile_aprs_gateway`'s own init script template. Not yet run against a real Pi.
+- [x] Wire `capture_worker.CaptureWorker` into `hsd.py`'s `start`/`stop` (2026-08-02): `start_listening()` now builds the `rtl_fm` argv via `build_rtl_fm_cmd()` and starts a `CaptureWorker` alongside `DecodeWorker`; `stop_listening()` tears both down. The two workers are wired only through the shared `chunks/` directory, same as `DecodeWorker`'s own design. Still unverified against real hardware (no RTL-SDR/antenna on hand) — covered by stubbed unit tests only, same pattern as the existing `DecodeWorker` tests.
 
 ## In progress / next up
 
-- [ ] Wire `capture_worker.CaptureWorker` into `hsd.py`'s `start`/`stop` — WAV chunks currently have to be dropped into `chunks/` externally
 - [ ] Track B-GPS, remaining: get a real 2D/3D fix (needs clearer sky view than was available this session) and validate the actual offset-computation math against it — only the no-fix path has real-hardware coverage so far
 - [ ] Track B-Radio: set up the RTL-SDR + HF antenna, swap the synthetic PCM generator for the real `rtl_fm` invocation, run the Phase 1 exit criterion (sustained multi-hour real-signal capture verified against UTC boundaries)
 - [ ] `provisioning/deploy.sh` + `install.sh` dry run against a real Pi once one exists with `minimal_pi`'s baseline on it

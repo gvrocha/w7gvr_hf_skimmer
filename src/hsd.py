@@ -20,11 +20,12 @@ magd.sock shape rather than inventing a new one:
 A "status" event is sent automatically to every client on connect. "spot"
 events are broadcast to all connected clients as they're decoded.
 
-NOTE: this version only manages decode_worker.DecodeWorker -- WAV chunks
-must be supplied into CHUNK_DIR externally (e.g. dropped in manually for
-testing). capture_worker.py integration (real rtl_fm/rtl_sdr capture) is
-a follow-up, tracked separately since it needs no radio to be written but
-does need one to be hardware-validated.
+start/stop drive both capture_worker.CaptureWorker (writes UTC-aligned WAV
+chunks into CHUNK_DIR from a live rtl_fm capture) and decode_worker.DecodeWorker
+(watches CHUNK_DIR and decodes each chunk as it lands) -- the two are wired
+only through that shared directory, same as DecodeWorker's own doc comment
+describes. build_rtl_fm_cmd()'s argv is unverified against real hardware
+(tracked in STATUS.md as Track B-Radio).
 """
 
 import csv
@@ -38,6 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from capture_worker import CaptureWorker, build_rtl_fm_cmd  # noqa: E402
 from decode_worker import DecodeWorker, Spot  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -74,6 +76,7 @@ _session_seq: Optional[str] = None
 _tsv_path: Optional[Path] = None
 _spot_count = 0
 _decode_worker: Optional[DecodeWorker] = None
+_capture_worker: Optional[CaptureWorker] = None
 _state_lock = threading.Lock()
 
 _log = logging.getLogger("hsd")
@@ -186,7 +189,7 @@ def _on_spot(spot: Spot) -> None:
 
 
 def start_listening() -> None:
-    global _decode_worker
+    global _decode_worker, _capture_worker
     with _state_lock:
         if config["listening"]:
             return
@@ -199,16 +202,27 @@ def start_listening() -> None:
             results_callback=_on_spot,
         )
         _decode_worker.start()
+        capture_cmd = build_rtl_fm_cmd(config["dial_frequency"], config["sample_rate"], config["gain"])
+        _capture_worker = CaptureWorker(
+            capture_cmd=capture_cmd,
+            chunk_dir=CHUNK_DIR,
+            mode=config["mode"],
+            sample_rate=int(config["sample_rate"]),
+        )
+        _capture_worker.start()
         config["listening"] = True
         _save_config()
         _log.info("started session %s (mode=%s decoder=%s)", _session_seq, config["mode"], config["decoder"])
 
 
 def stop_listening() -> None:
-    global _decode_worker
+    global _decode_worker, _capture_worker
     with _state_lock:
         if not config["listening"]:
             return
+        if _capture_worker:
+            _capture_worker.stop()
+            _capture_worker = None
         if _decode_worker:
             _decode_worker.stop()
             _decode_worker = None

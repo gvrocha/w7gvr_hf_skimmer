@@ -41,6 +41,28 @@ class _StubDecodeWorker:
         self.stopped = True
 
 
+class _StubCaptureWorker:
+    """Stands in for capture_worker.CaptureWorker so these tests never spawn
+    a real rtl_fm subprocess."""
+
+    instances = []
+
+    def __init__(self, capture_cmd, chunk_dir, mode, sample_rate, **kwargs):
+        self.capture_cmd = capture_cmd
+        self.chunk_dir = chunk_dir
+        self.mode = mode
+        self.sample_rate = sample_rate
+        self.started = False
+        self.stopped = False
+        _StubCaptureWorker.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
 class HsdTestCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -52,6 +74,7 @@ class HsdTestCase(unittest.TestCase):
             "CHUNK_DIR": hsd.CHUNK_DIR,
             "LOG_COUNTER_FILE": hsd.LOG_COUNTER_FILE,
             "DecodeWorker": hsd.DecodeWorker,
+            "CaptureWorker": hsd.CaptureWorker,
             "config": dict(hsd.config),
         }
 
@@ -60,11 +83,14 @@ class HsdTestCase(unittest.TestCase):
         hsd.CHUNK_DIR = tmp_path / "chunks"
         hsd.LOG_COUNTER_FILE = tmp_path / ".log_counter"
         hsd.DecodeWorker = _StubDecodeWorker
+        hsd.CaptureWorker = _StubCaptureWorker
         hsd.config = dict(hsd.DEFAULT_CONFIG)
         hsd._session_seq = None
         hsd._spot_count = 0
         hsd._decode_worker = None
+        hsd._capture_worker = None
         _StubDecodeWorker.instances = []
+        _StubCaptureWorker.instances = []
 
     def tearDown(self):
         for key, value in self._orig.items():
@@ -112,18 +138,25 @@ class HsdTestCase(unittest.TestCase):
         self.assertTrue(hsd._tsv_path.exists())
         self.assertEqual(len(_StubDecodeWorker.instances), 1)
         self.assertTrue(_StubDecodeWorker.instances[0].started)
+        self.assertEqual(len(_StubCaptureWorker.instances), 1)
+        self.assertTrue(_StubCaptureWorker.instances[0].started)
+        self.assertEqual(_StubCaptureWorker.instances[0].chunk_dir, hsd.CHUNK_DIR)
+        self.assertEqual(_StubCaptureWorker.instances[0].sample_rate, int(hsd.config["sample_rate"]))
 
     def test_start_listening_is_idempotent(self):
         hsd.start_listening()
         hsd.start_listening()
         self.assertEqual(len(_StubDecodeWorker.instances), 1)
+        self.assertEqual(len(_StubCaptureWorker.instances), 1)
 
     def test_stop_listening_stops_worker(self):
         hsd.start_listening()
-        worker = _StubDecodeWorker.instances[0]
+        decode_worker = _StubDecodeWorker.instances[0]
+        capture_worker = _StubCaptureWorker.instances[0]
         hsd.stop_listening()
         self.assertFalse(hsd.config["listening"])
-        self.assertTrue(worker.stopped)
+        self.assertTrue(decode_worker.stopped)
+        self.assertTrue(capture_worker.stopped)
 
     def test_on_spot_writes_tsv_row_and_increments_count(self):
         hsd.start_listening()
