@@ -26,6 +26,10 @@ https://wd2.wsprdaemon.org/?query=SELECT+1
 Append `FORMAT JSON`, `FORMAT TSV`, etc. to control output shape.
 Any HTTP client works — no ClickHouse native protocol (port 9000) needed.
 
+**Use GET, not POST-with-form-body.** `db1.wspr.live` returns a bare 403 on POST entirely.
+wd1/wd2 accept POST, but only if the raw SQL is the POST body itself — sending a form-encoded `query=...` body (the naive `curl --data-urlencode "query=..."` default) makes ClickHouse try to parse the literal string `query=SELECT ...` as SQL and fail with a syntax error.
+`curl --get --data-urlencode "query=..."` (forces GET, URL-encodes correctly) works uniformly across all three hosts.
+
 **Rate limits / etiquette (documented on wspr.live):** 100,000 rows per query, up to 1,000 queries/day before throttling to 10,000-row results, ~5s cooldown expected between requests, and table-format output capped at 10,000 rows (never use table format for automated queries).
 Always filter by time range and band rather than pulling unbounded data.
 
@@ -61,10 +65,54 @@ This is not guaranteed complete — an ungranted or unguessed table would be inv
 - `wsprdaemon.noise` — same as wd1
 - `wsprdaemon.bands` — band/frequency reference table (not present on wd1)
 - `psk.spots` — same as wd1
-- `default.wsprdaemon_spots` — legacy/duplicate of `wsprdaemon.spots`
-- `default.wsprdaemon_noise` — legacy/duplicate of `wsprdaemon.noise`, but with extra columns (`seqnum`, `running_jobs`, `receiver_descriptions`)
+- `default.wsprdaemon_spots` — a **view** (`CREATE VIEW ... AS SELECT * FROM wsprdaemon.spots`), not a separate physical table
+- `default.wsprdaemon_noise` — a **view** over `wsprdaemon.noise`, but its declared column list includes `seqnum`, `running_jobs`, `receiver_descriptions`, which do not exist in the current `wsprdaemon.noise` table definition — the view's cached header looks stale relative to the base table (see caveat below)
 
 No `pskreporter` database on wd2 — asymmetric with wd1.
+
+## Table engines and sorting keys
+
+Pulled via `SHOW CREATE TABLE` (GET request — these hosts reject the query-in-POST-body form; use `?query=...` in the URL, same as everything else here).
+ClickHouse has no primary-key/foreign-key concept in the relational sense.
+What it has instead is a **sorting key** (`ORDER BY` in the table definition), which determines which column filters are cheap versus which force a full scan, plus optional secondary "skip" indexes.
+There is no referential integrity anywhere — nothing stops a row in one table from pointing at a callsign or grid that doesn't exist in another table.
+
+| Table | Engine | Partition | Sorting key (`ORDER BY`) | Skip indexes |
+|---|---|---|---|---|
+| db1.wspr.live `wspr.rx` | ReplacingMergeTree | `toYYYYMM(time)` | `(band, time, id)` | minmax on `id` |
+| wd1/wd2 `wspr.rx` | ReplacingMergeTree | `toYYYYMM(time)` | `(rx_sign, band, time, id)` | minmax on `id` |
+| wd1/wd2 `wsprdaemon.spots` | ReplacingMergeTree | `toYYYYMM(time)` | `(rx_sign, tx_sign, band, rx_id, time)` | none |
+| wd1/wd2 `wsprdaemon.noise` | ReplacingMergeTree | `toYYYYMM(time)` | `(site, band, receiver, time)` | none |
+| wd1/wd2 `psk.spots` | ReplacingMergeTree | `toYYYYMM(time)` | `(mode, rx_sign, receiver, time, frequency)` | bloom_filter on `rx_sign`, `tx_call` |
+| wd1 `pskreporter.rx` | MergeTree | `toYYYYMM(time)` | `(tx_loc, rx_loc, band, tx_sign, rx_sign, time)` | none |
+| db1.wspr.live `wspr.beacons`/`wspr.monitors`/`wspr.bands` | MergeTree | none | `id` (or `band` for `bands`) | none |
+
+**Practical implication:** filtering by the leading sorting-key column(s) is what makes a query fast.
+db1.wspr.live's `wspr.rx` is sorted `(band, time, id)`, so `WHERE band = 20 AND time > ...` is efficient there.
+wd1/wd2's copy of the *same-looking* table is sorted `(rx_sign, band, time, id)` instead — a query that's fast on db1.wspr.live because it filters by band+time first will scan more on wd1/wd2 unless it also filters by `rx_sign`.
+Don't assume "same columns" means "same query plan" across hosts.
+
+**Schema drift between wd1 and wd2, found via `SHOW CREATE TABLE` (not visible from `DESCRIBE TABLE` alone):**
+- `wsprdaemon.spots.id` is a computed `ALIAS` column on wd1 (`cityHash64(rx_sign, tx_sign, band, rx_id, time, frequency)` — not stored) but **does not exist at all** on wd2.
+- `wsprdaemon.spots.azimuth` / `rx_azimuth` are `Int16`/`Int32` on wd1 but `Float32` on wd2.
+- `pskreporter` database exists only on wd1, not wd2.
+- `wsprdaemon.bands` exists only on wd2.
+
+Treat wd1 and wd2 as similar, not interchangeable — a query built against one may error or behave differently against the other.
+
+## How the tables relate
+
+There are no declared foreign keys.
+Any cross-table relationship has to be built manually in the query, by joining on shared columns that carry the same real-world meaning:
+
+- **`wspr.rx` (any host) ↔ `wsprdaemon.spots`**: same conceptual spot, joinable on `(time, rx_sign, tx_sign, band, frequency)`.
+`wsprdaemon.spots` is roughly a superset — every wsprdaemon-software upload should also appear in `wspr.rx` (since it's forwarded to wsprnet.org too), but the reverse isn't true.
+- **`wsprdaemon.spots` ↔ `wsprdaemon.noise`**: joinable on `(time, band, receiver)`/`site` — noise is a station-level periodic reading, not one row per spot, so this is a many-to-one join (many spots share one noise reading for the same station/band/time bucket).
+- **`psk.spots` ↔ `pskreporter.rx`**: `psk.spots` is wsprdaemon's pre-forward staging row (has `forward_to_pskreporter` flag); `pskreporter.rx` is the normalized post-forward view, joinable on `(time, rx_sign, tx_call/tx_sign, band, frequency)`.
+- **`wspr.rx` ↔ `wspr.beacons` / `wspr.monitors`**: join on callsign (`beacons.sign` = `rx.tx_sign`, `monitors.sign` = `rx.rx_sign`) to get static station metadata (antenna, height, power) for a spot's transmitter/receiver.
+- **`wspr.rx` ↔ `wspr.bands`**: join on `band` to get the display name/reference frequency for a numeric band code.
+
+None of these joins are enforced or guaranteed consistent — they're conventions inferred from column naming and shared meaning across independently-populated tables, not schema-level constraints.
 
 ## Key schemas
 
