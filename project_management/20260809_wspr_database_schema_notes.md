@@ -103,14 +103,26 @@ Treat wd1 and wd2 as similar, not interchangeable — a query built against one 
 ## How the tables relate
 
 There are no declared foreign keys.
-Any cross-table relationship has to be built manually in the query, by joining on shared columns that carry the same real-world meaning:
+Any cross-table relationship has to be built manually in the query, by joining on shared columns that carry the same real-world meaning — and, critically, **`band` is not one consistent column across this whole database**, even though it's named `band` and typed `Int16` everywhere.
+There are two different encodings in play:
 
-- **`wspr.rx` (any host) ↔ `wsprdaemon.spots`**: same conceptual spot, joinable on `(time, rx_sign, tx_sign, band, frequency)`.
-`wsprdaemon.spots` is roughly a superset — every wsprdaemon-software upload should also appear in `wspr.rx` (since it's forwarded to wsprnet.org too), but the reverse isn't true.
-- **`wsprdaemon.spots` ↔ `wsprdaemon.noise`**: joinable on `(time, band, receiver)`/`site` — noise is a station-level periodic reading, not one row per spot, so this is a many-to-one join (many spots share one noise reading for the same station/band/time bucket).
-- **`psk.spots` ↔ `pskreporter.rx`**: `psk.spots` is wsprdaemon's pre-forward staging row (has `forward_to_pskreporter` flag); `pskreporter.rx` is the normalized post-forward view, joinable on `(time, rx_sign, tx_call/tx_sign, band, frequency)`.
-- **`wspr.rx` ↔ `wspr.beacons` / `wspr.monitors`**: join on callsign (`beacons.sign` = `rx.tx_sign`, `monitors.sign` = `rx.rx_sign`) to get static station metadata (antenna, height, power) for a spot's transmitter/receiver.
-- **`wspr.rx` ↔ `wspr.bands`**: join on `band` to get the display name/reference frequency for a numeric band code.
+- **Numeric band code** (`wspr.bands.band`, `wsprdaemon.bands.band`, `wspr.rx.band`, `pskreporter.rx.band`) — an arbitrary internal code, e.g. `7` = 40m, `14` = 20m, `-1` = LF.
+- **Wavelength in meters** (`wsprdaemon.spots.band`, `wsprdaemon.noise.band`, `psk.spots.band`) — the literal band name as a number, e.g. `40` = 40m, `20` = 20m.
+
+This was only caught by testing actual joins, not by reading `DESCRIBE TABLE` output (both look like a column called `band` of type `Int16`) — a join written as `a.band = b.band` across these two families silently returns zero rows or, worse, matches the wrong band.
+Convert through the `bands` lookup table (`wspr.bands` on db1.wspr.live, `wsprdaemon.bands` on wd2 — **not present on wd1**, see example below) or hardcode the small mapping table.
+Note `wspr.bands.display` uses literal `"LF"`/`"MF"` for the two lowest bands instead of a meters figure (`2200`/`630`), so a mechanical "strip the `m` suffix" conversion needs a special case for those two.
+
+Relationships, with verification status from live testing on 2026-08-09:
+
+- **`wspr.rx` (any host) ↔ `wsprdaemon.spots`** — same conceptual spot. Join on `(time, rx_sign, tx_sign)` plus band *converted* (see above) — a naive `r.band = s.band` returns 0 rows. Verified working.
+`wsprdaemon.spots` is roughly a superset — every wsprdaemon-software upload should also appear in `wspr.rx` (forwarded to wsprnet.org too) — but the reverse isn't true.
+- **`wsprdaemon.spots` ↔ `wsprdaemon.noise`** — join on `s.rx_sign = n.site` (**not** `n.receiver` — `receiver` is a hardware/antenna identifier local to the station, e.g. `KIWI_2`; `site` is the callsign) plus `toString(s.band) = n.band` (both already use the meters encoding, so no conversion needed here). Verified working.
+Noise is a station-level periodic reading, not one row per spot, so this is a many-to-one join.
+- **`psk.spots` ↔ `pskreporter.rx`** (wd1 only — `pskreporter` database doesn't exist on wd2) — intended join on `(time, rx_sign, tx_call = tx_sign)` plus band converted (`psk.spots.band` is meters, `pskreporter.rx.band` is numeric code — same mismatch as above). **Not verified**: an exact `time` match returned no rows in testing, even for rows minutes old, and `pskreporter.rx` is a 14-billion-row table sorted `(tx_loc, rx_loc, band, tx_sign, rx_sign, time)`, so a time-only filter forces a near-full scan and previous attempts on it timed out. If pursuing this, try a small time-window (`BETWEEN p.time - 5 AND p.time + 5`) rather than exact equality, and always constrain `tx_sign`/`rx_sign` too so the sort key is used.
+- **`wspr.rx` ↔ `wspr.beacons`**: `beacons.sign = rx.tx_sign`. Verified working (69,547 matching rows in a 1-day window on db1.wspr.live).
+- **`wspr.rx` ↔ `wspr.monitors`**: `monitors.sign = rx.rx_sign` — the receiver-side mirror of the beacons join above. Same simple string-equality shape as the verified beacons join; not independently re-tested.
+- **`wspr.rx` ↔ `wspr.bands`**: join on `band` directly (both use the numeric code, no conversion needed). Verified working.
 
 None of these joins are enforced or guaranteed consistent — they're conventions inferred from column naming and shared meaning across independently-populated tables, not schema-level constraints.
 
@@ -159,6 +171,57 @@ tx_lat Float32, tx_lon Float32, tx_loc LowCardinality(String), distance UInt16, 
 rx_azimuth UInt16, frequency UInt32, snr Int8, version LowCardinality(String)
 ```
 
+## Example cross-table join queries
+
+All verified live against the stated host on 2026-08-09.
+Run via `curl --get --data-urlencode "query=..." "https://<host>/"` per the query-mechanism section above.
+
+**`wspr.rx` × `wsprdaemon.spots`** — get wsprdaemon's decode diagnostics (noise, sync quality, drift metrics) for a spot that also made it to the plain wsprnet.org feed. Run on wd1 or wd2 (needs a `bands` table to convert the two `band` encodings; wd1 doesn't have one, so this example uses wd2's `wsprdaemon.bands`):
+
+```sql
+SELECT s.time, s.rx_sign, s.tx_sign, s.band AS band_m, r.snr AS wsprnet_snr, s.snr AS wsprdaemon_snr,
+       s.c2_noise, s.sync_quality, s.dt
+FROM wsprdaemon.spots s
+INNER JOIN wsprdaemon.bands bd ON toInt16OrNull(replaceAll(bd.display, 'm', '')) = s.band
+INNER JOIN wspr.rx r ON r.band = bd.band AND r.time = s.time AND r.rx_sign = s.rx_sign AND r.tx_sign = s.tx_sign
+WHERE s.time > now() - INTERVAL 1 HOUR
+ORDER BY s.time DESC
+LIMIT 20
+```
+
+**`wsprdaemon.spots` × `wsprdaemon.noise`** — attach the receiving station's noise floor to each spot it made. Run on wd1 or wd2:
+
+```sql
+SELECT s.time, s.rx_sign, s.tx_sign, s.band, s.snr, n.rms_level, n.c2_level
+FROM wsprdaemon.spots s
+INNER JOIN wsprdaemon.noise n ON toString(s.band) = n.band AND s.rx_sign = n.site AND s.time = n.time
+WHERE s.time > now() - INTERVAL 1 HOUR
+ORDER BY s.time DESC
+LIMIT 20
+```
+
+**`wspr.rx` × `wspr.beacons`** — attach transmitter station metadata (antenna, power, height) to spots of known WSPR beacons. Run on db1.wspr.live:
+
+```sql
+SELECT r.time, r.tx_sign, r.snr, b.antenna, b.power AS beacon_power_dbm, b.hagl, b.hamsl
+FROM wspr.rx r
+INNER JOIN wspr.beacons b ON r.tx_sign = b.sign
+WHERE r.time > now() - INTERVAL 1 DAY
+ORDER BY r.time DESC
+LIMIT 20
+```
+
+**`wspr.rx` × `wspr.bands`** — resolve the numeric band code to a display name/reference frequency. Run on db1.wspr.live (or any host, since both columns use the numeric-code encoding everywhere `wspr.bands`/`wsprdaemon.bands` exists):
+
+```sql
+SELECT r.time, r.tx_sign, r.band, bd.display AS band_name, r.frequency
+FROM wspr.rx r
+INNER JOIN wspr.bands bd ON r.band = bd.band
+WHERE r.time > now() - INTERVAL 10 MINUTE
+ORDER BY r.time DESC
+LIMIT 20
+```
+
 ## Bulk export tool
 
 `wspr.live/wspr_downloader.php` ("Wspr Exporter") supports CSV, JSON, "JSON Compact," "JSON Rows," and XML — plain text output, not a compressed archive.
@@ -166,3 +229,11 @@ Filters: start/end time (UTC), sender callsign (wildcard `%`), receiver callsign
 
 No file-size or row-count preview is offered before generating a download.
 The only numbers surfaced are the rate-limit caps described above, plus a general database-total figure ("more than 4,000,000,000 spots") — nothing that estimates the size of a specific filtered export in advance.
+The exporter also caps the selectable date range to 31 days per request.
+
+A real sample confirms the row cap applies here too: an export requested for all of `wspr.rx` over 2026-07-01 to 2026-07-31 (no other filter) came back as a 54MB XML file — but its own footer reports `<rows>100000</rows>` against `<rows_before_limit_at_least>204799602</rows_before_limit_at_least>`.
+In other words, ~205 million rows matched and only the first 100,000 (per the standard per-request cap) were actually returned — the 31-day *date-range* limit and the 100,000-row *result* limit are independent constraints, and hitting the date-range cap doesn't mean you got everything in that range.
+Pulling a full month for an unfiltered global query would need many follow-up requests (e.g. paged by band or by hour), not one.
+Also worth noting: XML is verbose — this 100k-row/54MB ratio is roughly 540 bytes/row, well above what CSV or JSON Compact would need for the same data.
+Saved locally (gitignored, not committed — 54MB is too large for this repo) at `project_management/reference_data/wspr_live_rx_2026-07_100k-row-sample.xml`.
+Its `<meta><columns>` header is itself a live schema description and matches the `wspr.rx` schema documented above exactly.

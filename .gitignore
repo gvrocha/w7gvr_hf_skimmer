@@ -28,3 +28,9 @@ vendor/ft8_lib/.build/
 
 # Offline provisioning bundle — rebuildable via provisioning/build-bundle.sh
 provisioning/bundle/
+
+# Large raw reference exports from external DBs — not meant for git, just local reference
+project_management/reference_data/
+
+# Auto-generated pandoc HTML previews of markdown notes (not something we author)
+project_management/*.html
