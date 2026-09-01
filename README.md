@@ -84,7 +84,12 @@ Rough sensitivity thresholds (50% decode probability, 2500 Hz reference bandwidt
 
 ## Setup
 
+This repo uses three git submodules under `vendor/` — `wsjtx`, `ft8_lib` (vendored decoders), and `minimal_pi` (reusable Pi base image; see `Layout` above).
+They aren't fetched by a plain `git clone`, so a fresh clone (or a copy onto a new machine) needs one extra step:
+
 ```sh
+git clone --recurse-submodules git@github.com:gvrocha/w7gvr_hf_skimmer.git
+# or, if already cloned without that flag:
 git submodule update --init --recursive
 ```
 
