@@ -24,8 +24,15 @@ start/stop drive both capture_worker.CaptureWorker (writes UTC-aligned WAV
 chunks into CHUNK_DIR from a live rtl_fm capture) and decode_worker.DecodeWorker
 (watches CHUNK_DIR and decodes each chunk as it lands) -- the two are wired
 only through that shared directory, same as DecodeWorker's own doc comment
-describes. build_rtl_fm_cmd()'s argv is unverified against real hardware
-(tracked in STATUS.md as Track B-Radio).
+describes. build_rtl_fm_cmd()'s argv is now validated against real hardware
+(see STATUS.md's Track B-Radio entry).
+
+A gps_clock.GpsClock runs for the whole daemon lifetime (not just while a
+session is active), started once in main(). CaptureWorker gets its chunk
+boundaries from _now_utc(), which prefers the GPS-disciplined clock over
+the Pi's own RTC-less system clock -- if gpsd isn't reachable at startup,
+_start_gps_clock() logs a warning and _now_utc() falls back to plain
+system time, same free-running philosophy as GpsClock.timestamp() itself.
 """
 
 import csv
@@ -35,12 +42,14 @@ import os
 import socket
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from capture_worker import CaptureWorker, build_rtl_fm_cmd  # noqa: E402
 from decode_worker import DecodeWorker, Spot  # noqa: E402
+from gps_clock import GpsClock, GpsdSource  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config" / "config.json"
@@ -77,9 +86,31 @@ _tsv_path: Optional[Path] = None
 _spot_count = 0
 _decode_worker: Optional[DecodeWorker] = None
 _capture_worker: Optional[CaptureWorker] = None
+_gps_clock: Optional[GpsClock] = None
 _state_lock = threading.Lock()
 
 _log = logging.getLogger("hsd")
+
+
+def _start_gps_clock() -> None:
+    """Start a GpsClock for the daemon's whole lifetime. If gpsd isn't
+    reachable (e.g. not installed/running yet), log a warning and leave
+    _gps_clock as None -- _now_utc() falls back to system time in that
+    case, same as GpsClock.timestamp() falls back before its first fix."""
+    global _gps_clock
+    try:
+        source = GpsdSource()
+    except OSError:
+        _log.warning("gpsd unreachable at startup -- falling back to system clock for chunk timing")
+        return
+    _gps_clock = GpsClock(source)
+    _gps_clock.start()
+
+
+def _now_utc() -> datetime:
+    if _gps_clock is not None:
+        return _gps_clock.timestamp()
+    return datetime.now(timezone.utc)
 
 
 def _load_config() -> None:
@@ -208,6 +239,7 @@ def start_listening() -> None:
             chunk_dir=CHUNK_DIR,
             mode=config["mode"],
             sample_rate=int(config["sample_rate"]),
+            now_fn=_now_utc,
         )
         _capture_worker.start()
         config["listening"] = True
@@ -305,6 +337,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     _load_config()
+    _start_gps_clock()
     if config.get("listening"):
         start_listening()
     _run_socket_server()

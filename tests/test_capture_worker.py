@@ -127,6 +127,43 @@ class TestCaptureWorkerIntegration(unittest.TestCase):
                 duration = wav.getnframes() / wav.getframerate()
                 self.assertAlmostEqual(duration, 7.5, delta=0.1)
 
+    def test_now_fn_is_used_for_chunk_boundary_instead_of_system_clock(self):
+        # A fake "now" nowhere near the real system clock -- if now_fn
+        # weren't actually wired in, the resulting chunk filename would
+        # reflect real system time instead of this fixed fake instant.
+        pacer_script = (
+            "import sys, time\n"
+            "data = b'\\x00' * 24000\n"
+            "while True:\n"
+            "    sys.stdout.buffer.write(data)\n"
+            "    sys.stdout.buffer.flush()\n"
+            "    time.sleep(1.0)\n"
+        )
+        fake_now = datetime(2030, 5, 17, 12, 0, 3, tzinfo=UTC)
+        expected_boundary = next_boundary(fake_now, 7.5)
+
+        chunks_seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            chunk_dir = Path(tmp)
+            worker = CaptureWorker(
+                capture_cmd=[sys.executable, "-c", pacer_script],
+                chunk_dir=chunk_dir,
+                mode="ft4",
+                sample_rate=12000,
+                chunk_ready_callback=chunks_seen.append,
+                now_fn=lambda: fake_now,
+            )
+            worker.start()
+            try:
+                deadline = time.time() + 25
+                while time.time() < deadline and not chunks_seen:
+                    time.sleep(0.2)
+            finally:
+                worker.stop()
+
+            self.assertGreater(len(chunks_seen), 0, "no chunk was written within the deadline")
+            self.assertEqual(chunks_seen[0].name, chunk_filename(expected_boundary))
+
 
 if __name__ == "__main__":
     unittest.main()

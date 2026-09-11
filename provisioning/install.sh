@@ -25,6 +25,9 @@ done
 echo "==> Installing python3, gpsd, rtl-sdr from the offline bundle"
 apk add --repository "$BUNDLE_DIR" --allow-untrusted --no-network python3 gpsd gpsd-openrc rtl-sdr
 
+echo "==> Creating runtime directories (gitignored, not present after deploy.sh's rsync)"
+mkdir -p "$REPO_DIR/logs" "$REPO_DIR/chunks" "$REPO_DIR/sessions" "$REPO_DIR/var"
+
 echo "==> Installing hsd OpenRC service"
 cp "$REPO_DIR/provisioning/hsd.openrc" /etc/init.d/hsd
 chmod +x /etc/init.d/hsd

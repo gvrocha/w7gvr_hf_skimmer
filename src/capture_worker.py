@@ -107,6 +107,11 @@ class CaptureWorker:
     build_rtl_fm_cmd(...)'s output in production, or any command emitting
     the same raw 16-bit mono PCM format for testing (e.g. a synthetic
     generator standing in for rtl_fm).
+
+    now_fn supplies the current UTC time used to compute the first chunk
+    boundary -- defaults to the system clock, but hsd.py passes in
+    GpsClock.timestamp so chunk filenames/boundaries are GPS-disciplined
+    rather than trusting a Pi's RTC-less, possibly-wrong system clock.
     """
 
     def __init__(
@@ -116,6 +121,7 @@ class CaptureWorker:
         mode: str,
         sample_rate: int,
         chunk_ready_callback: Optional[Callable[[Path], None]] = None,
+        now_fn: Optional[Callable[[], datetime]] = None,
     ):
         if mode not in CYCLE_SECONDS:
             raise ValueError(f"unknown mode: {mode!r}")
@@ -124,6 +130,7 @@ class CaptureWorker:
         self.mode = mode
         self.sample_rate = sample_rate
         self.chunk_ready_callback = chunk_ready_callback
+        self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self.cycle_seconds = CYCLE_SECONDS[mode]
 
         self._proc: Optional[subprocess.Popen] = None
@@ -171,7 +178,7 @@ class CaptureWorker:
     def _run(self) -> None:
         bytes_per_second = self.sample_rate * SAMPLE_WIDTH_BYTES
         for chunk_start, data in align_chunks(
-            self._proc.stdout.read, datetime.now(timezone.utc), self.cycle_seconds, bytes_per_second
+            self._proc.stdout.read, self.now_fn(), self.cycle_seconds, bytes_per_second
         ):
             if self._stop_event.is_set():
                 return

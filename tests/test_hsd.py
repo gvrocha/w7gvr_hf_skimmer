@@ -47,11 +47,12 @@ class _StubCaptureWorker:
 
     instances = []
 
-    def __init__(self, capture_cmd, chunk_dir, mode, sample_rate, **kwargs):
+    def __init__(self, capture_cmd, chunk_dir, mode, sample_rate, now_fn=None, **kwargs):
         self.capture_cmd = capture_cmd
         self.chunk_dir = chunk_dir
         self.mode = mode
         self.sample_rate = sample_rate
+        self.now_fn = now_fn
         self.started = False
         self.stopped = False
         _StubCaptureWorker.instances.append(self)
@@ -61,6 +62,36 @@ class _StubCaptureWorker:
 
     def stop(self):
         self.stopped = True
+
+
+class _StubGpsdSource:
+    """Stands in for gps_clock.GpsdSource -- raising_on_init lets a test
+    simulate gpsd being unreachable at startup."""
+
+    raising_on_init = False
+
+    def __init__(self):
+        if _StubGpsdSource.raising_on_init:
+            raise ConnectionRefusedError("gpsd not running")
+
+
+class _StubGpsClock:
+    """Stands in for gps_clock.GpsClock -- fixed_timestamp lets a test
+    control what timestamp() returns without a real fix."""
+
+    instances = []
+
+    def __init__(self, source):
+        self.source = source
+        self.started = False
+        self.fixed_timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        _StubGpsClock.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def timestamp(self):
+        return self.fixed_timestamp
 
 
 class HsdTestCase(unittest.TestCase):
@@ -75,6 +106,8 @@ class HsdTestCase(unittest.TestCase):
             "LOG_COUNTER_FILE": hsd.LOG_COUNTER_FILE,
             "DecodeWorker": hsd.DecodeWorker,
             "CaptureWorker": hsd.CaptureWorker,
+            "GpsdSource": hsd.GpsdSource,
+            "GpsClock": hsd.GpsClock,
             "config": dict(hsd.config),
         }
 
@@ -84,13 +117,18 @@ class HsdTestCase(unittest.TestCase):
         hsd.LOG_COUNTER_FILE = tmp_path / ".log_counter"
         hsd.DecodeWorker = _StubDecodeWorker
         hsd.CaptureWorker = _StubCaptureWorker
+        hsd.GpsdSource = _StubGpsdSource
+        hsd.GpsClock = _StubGpsClock
         hsd.config = dict(hsd.DEFAULT_CONFIG)
         hsd._session_seq = None
         hsd._spot_count = 0
         hsd._decode_worker = None
         hsd._capture_worker = None
+        hsd._gps_clock = None
         _StubDecodeWorker.instances = []
         _StubCaptureWorker.instances = []
+        _StubGpsdSource.raising_on_init = False
+        _StubGpsClock.instances = []
 
     def tearDown(self):
         for key, value in self._orig.items():
@@ -142,6 +180,7 @@ class HsdTestCase(unittest.TestCase):
         self.assertTrue(_StubCaptureWorker.instances[0].started)
         self.assertEqual(_StubCaptureWorker.instances[0].chunk_dir, hsd.CHUNK_DIR)
         self.assertEqual(_StubCaptureWorker.instances[0].sample_rate, int(hsd.config["sample_rate"]))
+        self.assertIs(_StubCaptureWorker.instances[0].now_fn, hsd._now_utc)
 
     def test_start_listening_is_idempotent(self):
         hsd.start_listening()
@@ -169,6 +208,29 @@ class HsdTestCase(unittest.TestCase):
         rows = hsd._tsv_path.read_text().splitlines()
         self.assertEqual(len(rows), 2)  # header + one row
         self.assertIn("N8PFK WF3H RR73", rows[1])
+
+    def test_now_utc_falls_back_to_system_time_by_default(self):
+        before = datetime.now(timezone.utc)
+        result = hsd._now_utc()
+        after = datetime.now(timezone.utc)
+        self.assertLessEqual(before, result)
+        self.assertLessEqual(result, after)
+
+    def test_now_utc_delegates_to_gps_clock_when_set(self):
+        stub_clock = _StubGpsClock(source=None)
+        hsd._gps_clock = stub_clock
+        self.assertEqual(hsd._now_utc(), stub_clock.fixed_timestamp)
+
+    def test_start_gps_clock_success_sets_and_starts_clock(self):
+        hsd._start_gps_clock()
+        self.assertIsNotNone(hsd._gps_clock)
+        self.assertTrue(hsd._gps_clock.started)
+        self.assertEqual(len(_StubGpsClock.instances), 1)
+
+    def test_start_gps_clock_handles_unreachable_gpsd_gracefully(self):
+        _StubGpsdSource.raising_on_init = True
+        hsd._start_gps_clock()  # must not raise
+        self.assertIsNone(hsd._gps_clock)
 
 
 if __name__ == "__main__":
