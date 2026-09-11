@@ -128,6 +128,18 @@ class TestDecodeChunkAgainstRealCorpus(unittest.TestCase):
         spots = decode_chunk(BIN_DIR, "ft8_lib", "ft4", wav)
         self.assertEqual(spots, [])
 
+    def test_ft8_lib_uses_chunk_filename_time_not_decoders_placeholder(self):
+        # decode_ft8 (ft8_lib) always prints "000000" in its own stdout
+        # regardless of the real time -- decode_chunk() must derive each
+        # spot's utc_timestamp from the chunk filename's own encoded time
+        # instead of trusting that placeholder (found via a real 20m FT8
+        # session where every spot came back stamped at midnight).
+        wav = FT8_FT4_CORPUS / "260708_014230.wav"
+        spots = decode_chunk(BIN_DIR, "ft8_lib", "ft4", wav)
+        self.assertGreater(len(spots), 0)
+        expected = datetime(2026, 7, 8, 1, 42, 30, tzinfo=timezone.utc)
+        self.assertTrue(all(s.utc_timestamp == expected for s in spots))
+
 
 @unittest.skipUnless(WSPR_SAMPLE.is_file(), "vendored WSPR sample not present")
 class TestDecodeChunkWspr(unittest.TestCase):

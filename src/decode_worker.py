@@ -31,6 +31,27 @@ def chunk_date(path: Path) -> date:
     return date(2000 + int(yy), int(mm), int(dd))
 
 
+def chunk_start(path: Path) -> datetime:
+    """Parse the full UTC start time encoded in a chunk filename
+    (YYMMDD_HHMMSS.wav) -- this is capture_worker's own GPS-disciplined
+    window-start time, and is authoritative for every message decoded
+    from that chunk (one chunk == one decode window, by construction).
+
+    Used instead of trusting a decoder's own self-reported time-of-day:
+    jt9 apparently derives its printed time from this same filename
+    convention, but decode_ft8 (ft8_lib) does not -- it always prints a
+    hardcoded "000000" placeholder regardless of the real time, which
+    would otherwise silently stamp every ft8_lib-decoded spot at
+    midnight (found via a real multi-minute capture session where every
+    spot showed identical 00:00:00 times despite spanning many chunks).
+    """
+    m = CHUNK_FILENAME_RE.match(path.name)
+    if not m:
+        raise ValueError(f"chunk filename doesn't match YYMMDD_HHMMSS.wav: {path.name}")
+    _, _, _, hms = m.groups()
+    return _combine_utc(chunk_date(path), hms)
+
+
 def _combine_utc(day: date, hms: str) -> datetime:
     """Combine a chunk's UTC date with a decoder-reported HHMM or HHMMSS time-of-day."""
     if len(hms) == 6:
@@ -163,6 +184,7 @@ def decode_chunk(
         raise ValueError(f"no decoder mapping for decoder={decoder!r} mode={mode!r}")
     binary, extra_args, parser = DECODERS[key]
     day = chunk_date(wav_path)
+    start = chunk_start(wav_path)
 
     work_dir = Path(work_dir) if work_dir else DEFAULT_WORK_DIR
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +201,11 @@ def decode_chunk(
     for line in result.stdout.splitlines():
         spot = parser(line, day)
         if spot is not None:
+            # Override whatever time-of-day the decoder itself reported
+            # (self-parsed from the filename by jt9, but a hardcoded
+            # placeholder from decode_ft8) with the chunk's own known-
+            # correct window start -- see chunk_start()'s docstring.
+            spot.utc_timestamp = start
             spots.append(spot)
     return spots
 
