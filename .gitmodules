@@ -9,3 +9,7 @@
 [submodule "vendor/minimal_pi"]
 	path = vendor/minimal_pi
 	url = https://github.com/gvrocha/minimal_pi.git
+[submodule "vendor/csdr"]
+	path = vendor/csdr
+	url = https://github.com/jketterl/csdr.git
+	ignore = untracked

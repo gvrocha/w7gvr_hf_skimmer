@@ -129,24 +129,66 @@ correctly. The band was never quiet. The hardware was never at fault.
 **`rtl_fm`'s own internal demodulation/scaling pipeline has a real,
 reproducible bug** for this use case.
 
-## Open question for next session
+## Resolution (2026-09-24): replaced rtl_fm with csdr, not numpy/scipy
 
-Two paths forward, not yet decided:
+Two paths were on the table: patch `rtl_fm` in place (`-F 9`/`-E dc`, needs
+live antenna access to test since `rtl_fm` has no file-replay mode), or
+replace its demod stage entirely. No antenna access was available, so
+replacement was investigated further before deciding.
 
-1. **Fix `rtl_fm` in place** — add `-F 9` (and maybe `-E dc`) to
-   `build_rtl_fm_cmd()` and re-test live against the antenna to confirm the
-   stock tool can be made to behave.
-2. **Replace `rtl_fm`'s demod stage** with something like
-   `tools/reference_usb_demod.py`'s approach, run continuously as part of
-   `CaptureWorker` instead of shelling out to `rtl_fm`. This is a bigger
-   architectural change: it'd add a `numpy`/`scipy` dependency, which is a
-   meaningfully heavier footprint to vendor onto the Pi 3B+ than anything
-   currently in the offline `apk` bundle. The rest of this codebase is
-   deliberately stdlib-only for exactly this portability reason (see
-   `gps_clock.py`'s docstring) — this would be the first exception.
+The `numpy`/`scipy` path (`tools/reference_usb_demod.py`) works, but a
+lighter option existed: [`csdr`](https://github.com/jketterl/csdr) (a
+fork of ha7ilm's original, actively maintained, used in OpenWebRX) is a
+small C++ DSP pipeline tool with a *documented* USB demod recipe (a
+"modified Weaver demodulator" — the same one-sided complex-bandpass
+technique the Python reference demod used by hand). Not packaged in
+Alpine, so vendored as source (`vendor/csdr`, matching `wsjtx`/`ft8_lib`'s
+pattern) and cross-built for `linux-aarch64` via the same Colima setup.
+Its only new runtime deps, `fftw-single-libs` (1.3 MiB) and `libsamplerate`
+(1.4 MiB), are dramatically lighter than `numpy`+`scipy`+`openblas`
+(~80 MiB) and don't compromise this codebase's stdlib-only design the
+same way a Python DSP dependency would. Bonus: `fftw-single-libs` is the
+same library `jt9` is missing on the Pi right now (see `STATUS.md`).
 
-Try (1) first next time an antenna is reachable — much smaller change, and
-may simply resolve it.
+Building `csdr` locally on the Mac hit its own portability wall first:
+its `CMakeLists.txt` shells out to `/proc/cpuinfo` for ARM NEON detection,
+which doesn't exist on macOS (Apple Silicon reports `CMAKE_SYSTEM_PROCESSOR
+= arm64`, which wrongly matches the Linux-32-bit-ARMv7 branch that does
+this). Confirmed this is Mac-only noise: real Linux `aarch64` -- the actual
+Pi target -- takes a separate `elseif` branch that never touches
+`/proc/cpuinfo` at all. Building for real `linux-aarch64` (via the
+project's existing Colima cross-build environment) worked cleanly with no
+Mac-specific patching needed. A second, unrelated macOS wall showed up in
+a full local build attempt: `ringbuffer.cpp` uses Linux's `mremap()`
+syscall (unavailable on macOS/BSD), confirming a `vendor/csdr/build-
+darwin-arm64/` isn't practical without real upstream portability work --
+not attempted, since it's not needed for the actual deployment target.
+
+Adapted the documented recipe (dial frequency is already the tuner center,
+so no frequency `shift` stage is needed) into
+`capture_worker.build_csdr_capture_cmd()`, producing an `rtl_sdr | csdr
+convert | csdr fractionaldecimator | csdr bandpass | csdr realpart | csdr
+limit | csdr convert` pipeline. Validated the real cross-built
+`linux-aarch64` binary against the same saved raw I/Q capture (`cat`
+substituted for the live `rtl_sdr` stage): **133 real messages decoded
+cleanly across all 7 chunks, zero clipping** -- matching the Python
+reference demod's result almost exactly.
+
+Wired in for real, not just proven as a standalone script:
+`CaptureWorker` now accepts a shell-pipeline `capture_cmd` (a `str`, not
+just `List[str]`), run with `shell=True` in its own process group so
+`stop()` can kill every pipeline stage together -- terminating just the
+shell would otherwise orphan `rtl_sdr`/`csdr` as zombie processes, a real
+bug caught by a dedicated test before it could bite in production.
+`hsd.py`'s `start_listening()` uses `build_csdr_capture_cmd()` by default
+now; `build_rtl_fm_cmd()` is kept for reference, not deleted.
+
+**Still not live-tested against a real antenna/live `rtl_sdr`** -- only
+validated by replaying the saved capture. One caveat worth a proper look
+before considering this fully settled: `csdr`'s own `CMakeLists.txt` and
+`LICENSE-GPL` file declare it GPL-3.0-or-later, not the "mostly BSD"
+framing its README suggests -- likely a non-issue since it's used here as
+a separate CLI tool rather than linked code, but not yet verified.
 
 ## Artifacts
 

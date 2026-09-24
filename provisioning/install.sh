@@ -15,6 +15,7 @@ BUNDLE_DIR="$REPO_DIR/provisioning/bundle"
 for f in "$REPO_DIR/vendor/wsjtx/build-linux-aarch64/jt9" \
          "$REPO_DIR/vendor/wsjtx/build-linux-aarch64/wsprd" \
          "$REPO_DIR/vendor/ft8_lib/build-linux-aarch64/decode_ft8" \
+         "$REPO_DIR/vendor/csdr/build-linux-aarch64/csdr" \
          "$BUNDLE_DIR/aarch64/APKINDEX.tar.gz"; do
   if [ ! -e "$f" ]; then
     echo "ERROR: missing $f -- run provisioning/build-bundle.sh on the dev machine first" >&2
@@ -22,8 +23,8 @@ for f in "$REPO_DIR/vendor/wsjtx/build-linux-aarch64/jt9" \
   fi
 done
 
-echo "==> Installing python3, gpsd, rtl-sdr from the offline bundle"
-apk add --repository "$BUNDLE_DIR" --allow-untrusted --no-network python3 gpsd gpsd-openrc rtl-sdr
+echo "==> Installing python3, gpsd, rtl-sdr, fftw-single-libs, libsamplerate from the offline bundle"
+apk add --repository "$BUNDLE_DIR" --allow-untrusted --no-network python3 gpsd gpsd-openrc rtl-sdr fftw-single-libs libsamplerate
 
 echo "==> Creating runtime directories (gitignored, not present after deploy.sh's rsync)"
 mkdir -p "$REPO_DIR/logs" "$REPO_DIR/chunks" "$REPO_DIR/sessions" "$REPO_DIR/var"

@@ -10,6 +10,7 @@ Run with: PYTHONPATH=src python3 -m unittest tests/test_capture_worker.py -v
 """
 
 import io
+import os
 import sys
 import tempfile
 import time
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from capture_worker import (  # noqa: E402
     CaptureWorker,
     align_chunks,
+    build_csdr_capture_cmd,
     chunk_filename,
     next_boundary,
 )
@@ -163,6 +165,137 @@ class TestCaptureWorkerIntegration(unittest.TestCase):
 
             self.assertGreater(len(chunks_seen), 0, "no chunk was written within the deadline")
             self.assertEqual(chunks_seen[0].name, chunk_filename(expected_boundary))
+
+
+class TestBuildCsdrCaptureCmd(unittest.TestCase):
+    def test_pipeline_contains_expected_stages_in_order(self):
+        cmd = build_csdr_capture_cmd(
+            "14074000", "12000", "42.1", iq_sample_rate=250000, bin_dir="/opt/bin"
+        )
+        self.assertIsInstance(cmd, str)
+        stages = [s.strip() for s in cmd.split("|")]
+        self.assertEqual(len(stages), 7)
+        self.assertEqual(stages[0], "rtl_sdr -f 14074000 -s 250000 -g 42.1 -")
+        self.assertEqual(stages[1], "/opt/bin/csdr convert -i char -o float")
+        self.assertIn("fractionaldecimator -f complex -p 20.833333333333332", stages[2])
+        self.assertIn("bandpass --fft --low 0 --high", stages[3])
+        self.assertEqual(stages[4], "/opt/bin/csdr realpart")
+        self.assertEqual(stages[5], "/opt/bin/csdr limit 1.0")
+        self.assertEqual(stages[6], "/opt/bin/csdr convert -i float -o s16")
+
+    def test_decimation_rate_matches_iq_and_audio_sample_rates(self):
+        cmd = build_csdr_capture_cmd("14074000", "10000", "40", iq_sample_rate=200000)
+        self.assertIn("-p 20.0", cmd)
+
+    def test_defaults_bin_dir_to_project_bin_directory(self):
+        cmd = build_csdr_capture_cmd("14074000", "12000", "42.1")
+        expected_bin = str(Path(__file__).resolve().parent.parent / "bin" / "csdr")
+        self.assertIn(expected_bin, cmd)
+
+
+class TestCaptureWorkerShellPipeline(unittest.TestCase):
+    """CaptureWorker must also support a shell-pipeline capture_cmd (str,
+    not List[str]) -- build_csdr_capture_cmd()'s `rtl_sdr | csdr | ...`
+    output. These tests use plain Python subprocesses standing in for the
+    real pipeline stages, same spirit as TestCaptureWorkerIntegration's
+    rtl_fm stand-in."""
+
+    def test_shell_pipeline_capture_writes_chunks(self):
+        pacer_script = (
+            "import sys, time\n"
+            "data = b'\\x00' * 24000\n"
+            "while True:\n"
+            "    sys.stdout.buffer.write(data)\n"
+            "    sys.stdout.buffer.flush()\n"
+            "    time.sleep(1.0)\n"
+        )
+        passthrough_script = (
+            "import sys\n"
+            "while True:\n"
+            "    data = sys.stdin.buffer.read(4096)\n"
+            "    if not data:\n"
+            "        break\n"
+            "    sys.stdout.buffer.write(data)\n"
+            "    sys.stdout.buffer.flush()\n"
+        )
+
+        chunks_seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pacer_path = tmp_path / "pacer.py"
+            passthrough_path = tmp_path / "passthrough.py"
+            pacer_path.write_text(pacer_script)
+            passthrough_path.write_text(passthrough_script)
+
+            chunk_dir = tmp_path / "chunks"
+            pipeline = f"{sys.executable} {pacer_path} | {sys.executable} {passthrough_path}"
+            worker = CaptureWorker(
+                capture_cmd=pipeline,
+                chunk_dir=chunk_dir,
+                mode="ft4",
+                sample_rate=12000,
+                chunk_ready_callback=chunks_seen.append,
+            )
+            worker.start()
+            try:
+                deadline = time.time() + 25
+                while time.time() < deadline and not chunks_seen:
+                    time.sleep(0.2)
+            finally:
+                worker.stop()
+
+            self.assertGreater(len(chunks_seen), 0, "no chunk was written within the deadline")
+            with wave.open(str(chunks_seen[0]), "rb") as wav:
+                self.assertEqual(wav.getframerate(), 12000)
+                self.assertAlmostEqual(wav.getnframes() / wav.getframerate(), 7.5, delta=0.1)
+
+    def test_stop_kills_every_stage_of_the_pipeline_not_just_the_shell(self):
+        # Each stage writes its own pid to a file, then blocks forever
+        # (sleep / reading stdin that never gets EOF). If stop() only
+        # terminated the shell (proc.pid) instead of the whole process
+        # group, both of these would be left running as orphans.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pidfile1 = tmp_path / "pid1"
+            pidfile2 = tmp_path / "pid2"
+            script1 = tmp_path / "stage1.py"
+            script2 = tmp_path / "stage2.py"
+            script1.write_text(
+                f"import os\n"
+                f"open(r'{pidfile1}', 'w').write(str(os.getpid()))\n"
+                f"import time\n"
+                f"time.sleep(30)\n"
+            )
+            script2.write_text(
+                f"import os, sys\n"
+                f"open(r'{pidfile2}', 'w').write(str(os.getpid()))\n"
+                f"sys.stdin.buffer.read()\n"
+            )
+
+            chunk_dir = tmp_path / "chunks"
+            pipeline = f"{sys.executable} {script1} | {sys.executable} {script2}"
+            worker = CaptureWorker(
+                capture_cmd=pipeline, chunk_dir=chunk_dir, mode="ft4", sample_rate=12000
+            )
+            worker.start()
+            try:
+                deadline = time.time() + 10
+                while time.time() < deadline and not (pidfile1.exists() and pidfile2.exists()):
+                    time.sleep(0.1)
+                self.assertTrue(pidfile1.exists() and pidfile2.exists(), "pipeline stages never started")
+                pid1 = int(pidfile1.read_text())
+                pid2 = int(pidfile2.read_text())
+
+                # Both children should be alive right now.
+                os.kill(pid1, 0)
+                os.kill(pid2, 0)
+            finally:
+                worker.stop()
+
+            time.sleep(0.3)
+            for pid in (pid1, pid2):
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
 
 
 if __name__ == "__main__":

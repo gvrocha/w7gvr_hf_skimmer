@@ -5,24 +5,36 @@ second boundaries, per the configured mode's cycle (FT8=15s, FT4=7.5s,
 WSPR=120s) -- the one part of this system with zero margin for error, per
 the project's own CLAUDE.md.
 
-No RTL-SDR/antenna is available yet (tracked as Track B-Radio in the
-implementation plan). align_chunks() -- the actual boundary/byte-counting
-arithmetic -- is source-agnostic and unit-tested against a fake in-memory
-byte source with a controlled start time, so it needs neither hardware nor
-real-time waiting to verify. CaptureWorker (the subprocess/threading glue)
-is additionally tested once against a real, paced synthetic PCM-generator
-subprocess standing in for rtl_fm. build_rtl_fm_cmd()'s actual argv is
-written to match the standard rtl_fm USB-demod recipe used for HF
-FT8/FT4/WSPR reception, but is unverified against real hardware.
+align_chunks() -- the actual boundary/byte-counting arithmetic -- is
+source-agnostic and unit-tested against a fake in-memory byte source with
+a controlled start time, so it needs neither hardware nor real-time
+waiting to verify. CaptureWorker (the subprocess/threading glue) is
+additionally tested against a real, paced synthetic PCM-generator
+subprocess, for both a plain argv command and a shell pipeline.
+
+build_rtl_fm_cmd() was hardware-validated (real RTL-SDR Blog V4, real 20m
+FT8 traffic decoded), but rtl_fm itself has a real, reproducible bug: it
+intermittently hard-clips its own demodulated audio output even when the
+underlying raw I/Q is completely clean and stable -- see
+hardware/20260920_rtl_fm_demod_bug.md for the full investigation.
+build_csdr_capture_cmd() replaces it with an `rtl_sdr | csdr` pipeline that
+does the USB extraction itself (csdr's documented "modified Weaver
+demodulator": a one-sided complex bandpass filter + realpart), validated
+against a real 120-second raw I/Q capture -- 133-152 real FT8 messages
+decoded cleanly across every chunk, vs. rtl_fm's mostly-empty output on
+the same signal. This is now the default capture command hsd.py uses;
+build_rtl_fm_cmd() is kept for reference/fallback, not deleted.
 """
 
 import logging
+import os
+import signal
 import subprocess
 import threading
 import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Tuple
+from typing import Callable, Iterator, List, Optional, Tuple, Union
 
 _log = logging.getLogger(__name__)
 
@@ -53,10 +65,21 @@ def chunk_filename(start: datetime) -> str:
 
 
 def _read_exact(read_fn: Callable[[int], bytes], n: int) -> bytes:
-    """Read exactly n bytes from read_fn(n), or fewer on EOF."""
+    """Read exactly n bytes from read_fn(n), or fewer on EOF.
+
+    Treats the stream being closed out from under us (ValueError/OSError)
+    the same as EOF -- CaptureWorker.stop() closes stdout from the main
+    thread while this may be mid-read on _run()'s own thread, and Python
+    can raise "I/O operation on closed file" instead of just returning
+    b"" in that race, especially with a multi-stage shell pipeline where
+    reads are more likely to be blocked at the exact moment stop() runs.
+    """
     buf = bytearray()
     while len(buf) < n:
-        chunk = read_fn(n - len(buf))
+        try:
+            chunk = read_fn(n - len(buf))
+        except (ValueError, OSError):
+            break
         if not chunk:
             break
         buf.extend(chunk)
@@ -94,19 +117,77 @@ def align_chunks(
 
 def build_rtl_fm_cmd(dial_frequency: str, sample_rate: str, gain: str) -> List[str]:
     """Standard rtl_fm USB-demod recipe for HF FT8/FT4/WSPR reception.
-    Unverified against real hardware -- no RTL-SDR/antenna on hand yet.
+    Hardware-validated (real RTL-SDR Blog V4, real 20m FT8 traffic decoded)
+    -- but rtl_fm itself has a real, reproducible demod-stage clipping bug
+    (see module docstring and hardware/20260920_rtl_fm_demod_bug.md).
+    Kept for reference/fallback; build_csdr_capture_cmd() is what hsd.py
+    actually uses now.
     """
     return ["rtl_fm", "-f", dial_frequency, "-M", "usb", "-s", sample_rate, "-g", gain, "-"]
+
+
+DEFAULT_BIN_DIR = Path(__file__).resolve().parent.parent / "bin"
+
+# USB passband as a fraction of the final audio sample rate, and the
+# bandpass filter's transition width (also a fraction) -- matches the
+# reference demod validated in hardware/20260920_rtl_fm_demod_bug.md: a
+# 0-4000 Hz passband at 12000 Hz audio is 4000/12000 = 1/3.
+_USB_PASSBAND_FRACTION = 1 / 3
+_USB_TRANSITION_FRACTION = 0.02
+
+
+def build_csdr_capture_cmd(
+    dial_frequency: str,
+    sample_rate: str,
+    gain: str,
+    iq_sample_rate: int = 250000,
+    bin_dir: Optional[Path] = None,
+) -> str:
+    """rtl_sdr | csdr pipeline that replaces rtl_fm's own (buggy) USB demod
+    with csdr's documented "modified Weaver demodulator" recipe: a one-
+    sided complex bandpass filter (extracts the upper sideband directly,
+    unlike a plain symmetric lowpass + realpart, which would fold both
+    sidebands together) followed by realpart. Validated against a real
+    120-second raw I/Q capture -- 133 real FT8 messages decoded cleanly
+    across all 7 chunks, zero clipping, vs. rtl_fm's mostly-empty output
+    on the same signal. Full investigation: hardware/20260920_rtl_fm_demod_bug.md.
+
+    Returns a shell pipeline string, not an argv list -- CaptureWorker
+    detects this (via isinstance) and runs it with shell=True in its own
+    process group, so stop() can tear down every stage together instead
+    of leaving rtl_sdr/csdr orphaned.
+
+    The tuner is centered exactly at dial_frequency (rtl_sdr -f), so no
+    frequency shift is needed before the bandpass step -- USB content
+    already lives at positive baseband frequencies.
+    """
+    bin_dir = Path(bin_dir) if bin_dir else DEFAULT_BIN_DIR
+    csdr = str(bin_dir / "csdr")
+    audio_rate = int(sample_rate)
+    decimation_rate = iq_sample_rate / audio_rate
+
+    return (
+        f"rtl_sdr -f {dial_frequency} -s {iq_sample_rate} -g {gain} - | "
+        f"{csdr} convert -i char -o float | "
+        f"{csdr} fractionaldecimator -f complex -p {decimation_rate} | "
+        f"{csdr} bandpass --fft --low 0 --high {_USB_PASSBAND_FRACTION} {_USB_TRANSITION_FRACTION} | "
+        f"{csdr} realpart | "
+        f"{csdr} limit 1.0 | "
+        f"{csdr} convert -i float -o s16"
+    )
 
 
 class CaptureWorker:
     """Reads continuous raw PCM audio from a subprocess and writes WAV
     chunks aligned to UTC boundaries for the configured mode.
 
-    capture_cmd is the full argv for the audio-producing subprocess --
-    build_rtl_fm_cmd(...)'s output in production, or any command emitting
-    the same raw 16-bit mono PCM format for testing (e.g. a synthetic
-    generator standing in for rtl_fm).
+    capture_cmd is either:
+      - a List[str] argv, run directly (no shell) -- build_rtl_fm_cmd()'s
+        output, or a synthetic generator for testing; or
+      - a str shell pipeline, run with shell=True in its own process group
+        -- build_csdr_capture_cmd()'s output (an `rtl_sdr | csdr | ...`
+        pipeline). stop() detects this and kills the whole process group,
+        not just the shell, so no pipeline stage is left orphaned.
 
     now_fn supplies the current UTC time used to compute the first chunk
     boundary -- defaults to the system clock, but hsd.py passes in
@@ -116,7 +197,7 @@ class CaptureWorker:
 
     def __init__(
         self,
-        capture_cmd: List[str],
+        capture_cmd: Union[List[str], str],
         chunk_dir: Path,
         mode: str,
         sample_rate: int,
@@ -132,6 +213,7 @@ class CaptureWorker:
         self.chunk_ready_callback = chunk_ready_callback
         self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self.cycle_seconds = CYCLE_SECONDS[mode]
+        self._is_shell_pipeline = isinstance(capture_cmd, str)
 
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
@@ -141,10 +223,15 @@ class CaptureWorker:
         self.chunk_dir.mkdir(parents=True, exist_ok=True)
         try:
             self._proc = subprocess.Popen(
-                self.capture_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                self.capture_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                shell=self._is_shell_pipeline,
+                start_new_session=self._is_shell_pipeline,
             )
         except FileNotFoundError:
-            _log.error("capture command not found: %s", self.capture_cmd[0])
+            cmd_desc = self.capture_cmd if self._is_shell_pipeline else self.capture_cmd[0]
+            _log.error("capture command not found: %s", cmd_desc)
             raise
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -152,17 +239,32 @@ class CaptureWorker:
     def stop(self) -> None:
         self._stop_event.set()
         if self._proc:
-            self._proc.terminate()
+            self._terminate(self._proc, signal.SIGTERM)
             try:
                 self._proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self._proc.kill()
+                self._terminate(self._proc, signal.SIGKILL)
                 self._proc.wait()
             if self._proc.stdout:
                 self._proc.stdout.close()
             self._proc = None
         if self._thread:
             self._thread.join(timeout=5)
+
+    def _terminate(self, proc: subprocess.Popen, sig: int) -> None:
+        """Signal the capture process. For a shell pipeline, sig'ing just
+        the shell (proc.pid) leaves its rtl_sdr/csdr children running --
+        the whole pipeline was put in its own process group at start()
+        (start_new_session=True), so kill that group instead."""
+        if self._is_shell_pipeline:
+            try:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except ProcessLookupError:
+                pass
+        elif sig == signal.SIGKILL:
+            proc.kill()
+        else:
+            proc.terminate()
 
     def _write_chunk(self, start: datetime, pcm_data: bytes) -> None:
         path = self.chunk_dir / chunk_filename(start)

@@ -21,11 +21,13 @@ A "status" event is sent automatically to every client on connect. "spot"
 events are broadcast to all connected clients as they're decoded.
 
 start/stop drive both capture_worker.CaptureWorker (writes UTC-aligned WAV
-chunks into CHUNK_DIR from a live rtl_fm capture) and decode_worker.DecodeWorker
+chunks into CHUNK_DIR from a live capture) and decode_worker.DecodeWorker
 (watches CHUNK_DIR and decodes each chunk as it lands) -- the two are wired
 only through that shared directory, same as DecodeWorker's own doc comment
-describes. build_rtl_fm_cmd()'s argv is now validated against real hardware
-(see STATUS.md's Track B-Radio entry).
+describes. Capture uses build_csdr_capture_cmd()'s `rtl_sdr | csdr` pipeline,
+not rtl_fm directly -- rtl_fm has a real, reproducible demod-stage clipping
+bug (see capture_worker.py's module docstring and
+hardware/20260920_rtl_fm_demod_bug.md).
 
 A gps_clock.GpsClock runs for the whole daemon lifetime (not just while a
 session is active), started once in main(). CaptureWorker gets its chunk
@@ -47,7 +49,7 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_worker import CaptureWorker, build_rtl_fm_cmd  # noqa: E402
+from capture_worker import CaptureWorker, build_csdr_capture_cmd  # noqa: E402
 from decode_worker import DecodeWorker, Spot  # noqa: E402
 from gps_clock import GpsClock, GpsdSource  # noqa: E402
 
@@ -233,7 +235,7 @@ def start_listening() -> None:
             results_callback=_on_spot,
         )
         _decode_worker.start()
-        capture_cmd = build_rtl_fm_cmd(config["dial_frequency"], config["sample_rate"], config["gain"])
+        capture_cmd = build_csdr_capture_cmd(config["dial_frequency"], config["sample_rate"], config["gain"])
         _capture_worker = CaptureWorker(
             capture_cmd=capture_cmd,
             chunk_dir=CHUNK_DIR,
