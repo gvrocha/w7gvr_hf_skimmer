@@ -92,10 +92,21 @@ class GpsClock:
     def poll_once(self) -> bool:
         """Read one report from the GPS source; update the offset on a good
         fix. Returns True if a usable (mode >= 2, has a time) fix was read.
+
+        Any read/connection error (a transient socket timeout, gpsd
+        hiccup, or malformed line) is treated the same as "no fix this
+        cycle" rather than left to propagate -- found via a real bug
+        where an ordinary TimeoutError from GpsdSource.next() silently
+        killed the whole background polling thread, permanently
+        disabling GPS discipline for the rest of the process's life
+        (chunk timestamps then free-ran on the system clock with no
+        further warning, not even the free-running fallback re-checking
+        for a fix again later). _run()'s retry_interval already exists
+        for exactly this "try again shortly" case.
         """
         try:
             report = self._source.next()
-        except StopIteration:
+        except (StopIteration, OSError, ValueError):
             return False
 
         mode = getattr(report, "mode", 0)

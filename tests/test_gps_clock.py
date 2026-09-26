@@ -34,6 +34,22 @@ class StubGpsSource:
         return next(self._reports)
 
 
+class FlakyGpsSource:
+    """Yields a fixed sequence of items, where an item that's an exception
+    instance is raised instead of returned -- stands in for GpsdSource
+    hitting a transient socket error (e.g. TimeoutError) partway through
+    an otherwise-working session."""
+
+    def __init__(self, items):
+        self._items = iter(items)
+
+    def next(self):
+        item = next(self._items)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
 class TestPollOnce(unittest.TestCase):
     def test_good_3d_fix_sets_offset(self):
         gps_time = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
@@ -72,6 +88,11 @@ class TestPollOnce(unittest.TestCase):
         clock = GpsClock(StubGpsSource([]))
         self.assertFalse(clock.poll_once())
 
+    def test_timeout_error_returns_false_without_raising(self):
+        clock = GpsClock(FlakyGpsSource([TimeoutError("timed out")]))
+        self.assertFalse(clock.poll_once())
+        self.assertFalse(clock.is_ready())
+
 
 class TestTimestamp(unittest.TestCase):
     def test_falls_back_to_system_time_before_any_fix(self):
@@ -91,6 +112,30 @@ class TestRunLoop(unittest.TestCase):
             while time.time() < deadline and not clock.is_ready():
                 time.sleep(0.05)
             self.assertTrue(clock.is_ready())
+        finally:
+            clock.stop()
+
+    def test_background_thread_survives_transient_error_and_recovers(self):
+        """Regression test for the real production bug: a raw TimeoutError
+        from the GPS source used to propagate out of poll_once() and kill
+        the polling thread silently -- is_ready() would then stay False
+        forever, even though a later poll would have succeeded. This
+        proves the thread keeps polling past the error and reaches a fix
+        on a subsequent cycle."""
+        gps_time = datetime.now(timezone.utc).isoformat()
+        items = [
+            TimeoutError("timed out"),
+            TimeoutError("timed out"),
+            FakeReport(mode=3, time=gps_time),
+        ]
+        clock = GpsClock(FlakyGpsSource(items), fixed_interval=10.0, retry_interval=0.05)
+        clock.start()
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline and not clock.is_ready():
+                time.sleep(0.05)
+            self.assertTrue(clock.is_ready())
+            self.assertTrue(clock._thread.is_alive())
         finally:
             clock.stop()
 
