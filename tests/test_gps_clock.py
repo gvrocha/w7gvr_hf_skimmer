@@ -3,7 +3,9 @@ needed). Run with:
   PYTHONPATH=src python3 -m unittest tests/test_gps_clock.py -v
 """
 
+import socket
 import sys
+import threading
 import time
 import unittest
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from gps_clock import GpsClock  # noqa: E402
+from gps_clock import GpsClock, GpsdSource  # noqa: E402
 
 TOLERANCE_SECONDS = 1.0
 
@@ -92,6 +94,44 @@ class TestPollOnce(unittest.TestCase):
         clock = GpsClock(FlakyGpsSource([TimeoutError("timed out")]))
         self.assertFalse(clock.poll_once())
         self.assertFalse(clock.is_ready())
+
+
+class TestGpsdSourceBacklog(unittest.TestCase):
+    """GpsdSource.next() over a real socket pair standing in for gpsd --
+    no application-level constructor connection dance needed, since these
+    tests bypass __init__ and drive the socket directly."""
+
+    def _make_source(self):
+        client_sock, server_sock = socket.socketpair()
+        source = GpsdSource.__new__(GpsdSource)
+        source._sock = client_sock
+        source._buf = b""
+        self.addCleanup(client_sock.close)
+        self.addCleanup(server_sock.close)
+        return source, server_sock
+
+    def test_next_returns_latest_tpv_discarding_stale_backlog(self):
+        source, server = self._make_source()
+        server.sendall(
+            b'{"class":"TPV","mode":3,"time":"2026-01-01T00:00:01Z"}\n'
+            b'{"class":"SKY"}\n'
+            b'{"class":"TPV","mode":3,"time":"2026-01-01T00:00:02Z"}\n'
+            b'{"class":"TPV","mode":3,"time":"2026-01-01T00:00:03Z"}\n'
+        )
+        time.sleep(0.05)  # let the bytes land in the client socket's buffer
+        report = source.next()
+        self.assertEqual(report.time, "2026-01-01T00:00:03Z")
+
+    def test_next_blocks_until_a_report_arrives_when_nothing_buffered(self):
+        source, server = self._make_source()
+
+        def send_later():
+            time.sleep(0.2)
+            server.sendall(b'{"class":"TPV","mode":3,"time":"2026-01-01T00:00:09Z"}\n')
+
+        threading.Thread(target=send_later, daemon=True).start()
+        report = source.next()
+        self.assertEqual(report.time, "2026-01-01T00:00:09Z")
 
 
 class TestTimestamp(unittest.TestCase):

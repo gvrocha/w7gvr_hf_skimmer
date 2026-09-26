@@ -56,7 +56,7 @@ from gps_clock import GpsClock, GpsdSource  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config" / "config.json"
 SOCKET_PATH = REPO_ROOT / "hsd.sock"
-CHUNK_DIR = REPO_ROOT / "chunks"
+CHUNK_DIR = REPO_ROOT / "chunks" / "rtlsdr"
 SESSIONS_DIR = REPO_ROOT / "sessions"
 LOGS_DIR = REPO_ROOT / "logs"
 LOG_COUNTER_FILE = REPO_ROOT / ".hsd_log_counter"

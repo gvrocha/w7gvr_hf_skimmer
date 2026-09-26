@@ -20,6 +20,7 @@ identical everywhere gpsd itself runs.
 """
 
 import json
+import select
 import socket
 import threading
 from datetime import datetime, timedelta, timezone
@@ -57,8 +58,17 @@ class GpsdSource:
         self._readline()  # discard gpsd's VERSION banner
         self._sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
 
-    def _readline(self) -> dict:
+    def _readline(self, block: bool = True) -> Optional[dict]:
+        """Return the next buffered line. With block=False, returns None
+        instead of calling recv() when nothing is already buffered and the
+        socket has nothing pending right now (a select() poll with zero
+        timeout) -- used by next() to drain an existing backlog without
+        waiting for gpsd to send anything new."""
         while b"\n" not in self._buf:
+            if not block:
+                readable, _, _ = select.select([self._sock], [], [], 0)
+                if not readable:
+                    return None
             chunk = self._sock.recv(4096)
             if not chunk:
                 raise ConnectionError("gpsd closed the connection")
@@ -67,10 +77,34 @@ class GpsdSource:
         return json.loads(line)
 
     def next(self) -> GpsReport:
+        """Return the most recent TPV report available, discarding any
+        older ones already sitting in the buffer.
+
+        gpsd streams TPV reports continuously (about once a second)
+        regardless of how often anyone reads them. GpsClock only calls
+        this every fixed_interval (30s by default), so without this
+        drain step, each call would just return the oldest unread report
+        -- a long-running connection falls further and further behind
+        real time forever, never catching up, since new reports keep
+        arriving faster than one-per-poll can consume them. Found live:
+        a freshly-started GpsdSource read the correct current time, but
+        hsd's own long-running one was several minutes stale by the time
+        a second, independently-timed capture was compared against it.
+        """
+        latest = None
         while True:
-            obj = self._readline()
+            obj = self._readline(block=False)
+            if obj is None:
+                break
             if obj.get("class") == "TPV":
-                return _TpvReport(mode=obj.get("mode", 0), time=obj.get("time"))
+                latest = obj
+        if latest is None:
+            while True:
+                obj = self._readline(block=True)
+                if obj.get("class") == "TPV":
+                    latest = obj
+                    break
+        return _TpvReport(mode=latest.get("mode", 0), time=latest.get("time"))
 
 
 class GpsClock:
