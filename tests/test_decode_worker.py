@@ -179,6 +179,47 @@ class TestDecodeWorker(unittest.TestCase):
         self.assertGreater(len(results), 0)
         self.assertTrue(all(isinstance(s, Spot) and s.mode == "ft4" for s in results))
 
+    def test_ignores_pre_existing_files_present_before_start(self):
+        # With no cleanup/retention policy on chunks/ (a known gap), stale
+        # WAV files from a previous session are always sitting there when a
+        # new session starts. A fresh worker must not re-decode that
+        # backlog -- only files that arrive after it starts. Found via a
+        # real live-test session that appeared to run far longer than it
+        # actually did, because a fresh DecodeWorker swept up and rapidly
+        # re-decoded ~50 leftover files from earlier sessions.
+        results = []
+        with tempfile.TemporaryDirectory() as tmp:
+            chunk_dir = Path(tmp)
+            # Pre-populate BEFORE the worker exists at all -- this is the
+            # stale backlog a real chunks/ dir would already have.
+            shutil.copy(FT8_FT4_CORPUS / "260708_014230.wav", chunk_dir / "260708_014230.wav")
+
+            worker = DecodeWorker(
+                chunk_dir=chunk_dir,
+                decoder="ft8_lib",
+                mode="ft4",
+                results_callback=results.append,
+                bin_dir=BIN_DIR,
+                poll_interval=0.2,
+            )
+            worker.start()
+            try:
+                # Give it several poll cycles' worth of time to (incorrectly)
+                # sweep up the pre-existing file, if the bug were present.
+                time.sleep(1.5)
+                self.assertEqual(results, [], "pre-existing file was decoded -- stale backlog not skipped")
+
+                # A genuinely NEW file dropped in after start() must still
+                # be picked up -- proves the worker is alive, not just quiet.
+                shutil.copy(FT8_FT4_CORPUS / "260708_014230.wav", chunk_dir / "270101_000000.wav")
+                deadline = time.time() + 10
+                while time.time() < deadline and len(results) == 0:
+                    time.sleep(0.2)
+            finally:
+                worker.stop()
+
+        self.assertGreater(len(results), 0, "genuinely new file was never decoded")
+
 
 if __name__ == "__main__":
     unittest.main()

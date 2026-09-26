@@ -253,6 +253,18 @@ class DecodeWorker:
 
     def _run(self) -> None:
         self.chunk_dir.mkdir(parents=True, exist_ok=True)
+        # Skip whatever's already sitting in chunk_dir at startup -- with no
+        # cleanup/retention policy on chunks/ (a known gap), leftover WAV
+        # files from previous sessions accumulate there indefinitely.
+        # Without this, the first poll's `_last_processed is None` check
+        # would treat every pre-existing file as "new" and immediately
+        # re-decode the entire backlog, inflating a fresh session's spot
+        # count with stale re-decodes (found via a real live-test session
+        # on 2026-09-25/26 that appeared to span ~19 real-time minutes but
+        # was mostly old files decoded in a rapid burst at startup).
+        existing = sorted(p.name for p in self.chunk_dir.glob("*.wav"))
+        if existing:
+            self._last_processed = existing[-1]
         while not self._stop_event.is_set():
             candidates = sorted(
                 p

@@ -57,7 +57,14 @@ colima nerdctl -- run --rm --platform linux/arm64 \
     cmake -S vendor/csdr -B vendor/csdr/build-linux-aarch64 -DCMAKE_BUILD_TYPE=Release
     cmake --build vendor/csdr/build-linux-aarch64 --target csdr-bin -j4
     cp vendor/csdr/build-linux-aarch64/src/apps/csdr/csdr vendor/csdr/build-linux-aarch64/csdr
+    cp -P vendor/csdr/build-linux-aarch64/src/lib/libcsdr.so* vendor/csdr/build-linux-aarch64/
   "
+# The csdr executable dynamically links against libcsdr.so, a shared
+# library built alongside it in the same tree -- not a system package, so
+# nothing on the default linker search path would find it. Copied flat
+# next to the executable (-P preserves the .so -> .so.N -> .so.N.M symlink
+# chain); bin/_platform.sh's decoder_bin() adds this directory to
+# LD_LIBRARY_PATH/DYLD_LIBRARY_PATH before exec'ing, so it resolves.
 
 echo "==> Building offline apk bundle (python3, gpsd, rtl-sdr, fftw-single-libs, libsamplerate + dependency closure)"
 mkdir -p "$BUNDLE_DIR/aarch64"

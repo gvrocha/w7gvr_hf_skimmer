@@ -17,5 +17,14 @@ decoder_bin() {
         exit 1
     fi
 
+    # Some vendored binaries (csdr) dynamically link against a shared
+    # library built alongside them in the same flat build-<platform>/
+    # directory, rather than a system package -- nothing on the default
+    # search path would find it otherwise. Harmless to add for binaries
+    # that don't need it (jt9/wsprd/decode_ft8).
+    build_dir=$(dirname "$path")
+    export LD_LIBRARY_PATH="$build_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export DYLD_LIBRARY_PATH="$build_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+
     exec "$path" "$@"
 }
