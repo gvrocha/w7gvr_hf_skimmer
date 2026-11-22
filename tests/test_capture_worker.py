@@ -9,6 +9,7 @@ a real, paced synthetic PCM-generator subprocess standing in for rtl_fm
 Run with: PYTHONPATH=src python3 -m unittest tests/test_capture_worker.py -v
 """
 
+import array
 import io
 import os
 import sys
@@ -16,7 +17,7 @@ import tempfile
 import time
 import unittest
 import wave
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -77,6 +78,30 @@ class TestAlignChunks(unittest.TestCase):
         self.assertEqual(chunks[0][1], chunk1_data)
         self.assertEqual(chunks[1][0], datetime(2026, 1, 1, 0, 0, 30, tzinfo=UTC))
         self.assertEqual(chunks[1][1], chunk2_data)
+
+    def test_warmup_never_splits_a_16bit_sample(self):
+        # Regression: a sub-second start offset used to make the discarded
+        # warmup an odd byte count, shifting every later sample by one byte.
+        cycle_seconds = 15.0
+        bytes_per_second = 12000 * 2
+        chunk_bytes = int(cycle_seconds * bytes_per_second)
+        # 0.0000625 s before :15 -> 0.0000625 * 24000 = 1.5 -> round() = 2;
+        # use offsets that land on odd counts: 1 byte = 1/24000 s.
+        for odd_bytes in (1, 3, 23999, 24001):
+            start_time = datetime(2026, 1, 1, 0, 0, 15, tzinfo=UTC) - timedelta(
+                seconds=odd_bytes / bytes_per_second
+            )
+            # Stream of 16-bit little-endian samples 0,1,2,... -- a byte
+            # shift would make samples look like 0x0100, 0x0200, ...
+            n_samples = (odd_bytes + 2 * chunk_bytes) // 2 + 2
+            stream = io.BytesIO(array.array("h", (i % 30000 for i in range(n_samples))).tobytes())
+            chunks = list(align_chunks(stream.read, start_time, cycle_seconds, bytes_per_second))
+            self.assertGreaterEqual(len(chunks), 1, odd_bytes)
+            for _start, data in chunks:
+                self.assertEqual(len(data) % 2, 0)
+                samples = array.array("h", data)
+                diffs = {(b - a) % 30000 for a, b in zip(samples, samples[1:])}
+                self.assertEqual(diffs, {1}, f"byte-misaligned samples for odd offset {odd_bytes}")
 
     def test_stops_on_incomplete_final_chunk(self):
         cycle_seconds = 15.0

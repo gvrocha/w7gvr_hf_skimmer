@@ -91,6 +91,7 @@ def align_chunks(
     start_time: datetime,
     cycle_seconds: float,
     bytes_per_second: int,
+    frame_bytes: int = SAMPLE_WIDTH_BYTES,
 ) -> Iterator[Tuple[datetime, bytes]]:
     """Yield (chunk_start_utc, pcm_bytes) pairs aligned to UTC boundaries of
     cycle_seconds, reading from read_fn(n) -> up to n bytes (b"" on EOF).
@@ -99,10 +100,20 @@ def align_chunks(
     discarded, so every yielded chunk is a full, boundary-aligned cycle --
     this is the only alignment step needed; everything after it is exact
     byte-counting against the nominal sample rate.
+
+    Every byte count is rounded to a whole number of frames (frame_bytes,
+    2 for 16-bit mono PCM). Found live 2026-11-22: the warmup was computed
+    as round(seconds * bytes_per_second), which is odd about half the
+    time for a sub-second start offset -- discarding an odd number of
+    bytes shifts every later 16-bit sample by one byte for the whole
+    session, turning the audio into uniform random noise (RMS ~= 32768/sqrt(3)
+    ~= 18900) that no decoder can read. So roughly every other session or
+    gain-sweep visit was silently deaf.
     """
-    chunk_bytes = int(round(cycle_seconds * bytes_per_second))
+    chunk_bytes = int(round(cycle_seconds * bytes_per_second)) // frame_bytes * frame_bytes
     boundary = next_boundary(start_time, cycle_seconds)
     warmup_bytes = max(0, int(round((boundary - start_time).total_seconds() * bytes_per_second)))
+    warmup_bytes -= warmup_bytes % frame_bytes
     if warmup_bytes:
         _read_exact(read_fn, warmup_bytes)
 
