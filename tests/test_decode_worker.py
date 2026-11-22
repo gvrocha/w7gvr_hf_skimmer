@@ -50,7 +50,7 @@ class TestParseJt9Line(unittest.TestCase):
         self.assertEqual(spot.mode, "ft8")
         self.assertEqual(spot.snr, 2.0)
         self.assertEqual(spot.dt, 0.5)
-        self.assertEqual(spot.freq_hz, 1488.0)
+        self.assertEqual(spot.audio_hz, 1488.0)
         self.assertEqual(spot.message, "N8PFK WF3H RR73")
 
     def test_decode_finished_line_ignored(self):
@@ -70,7 +70,7 @@ class TestParseDecodeFt8Line(unittest.TestCase):
         self.assertEqual(spot.utc_timestamp, datetime(2026, 6, 24, 0, 0, 0, tzinfo=timezone.utc))
         self.assertEqual(spot.snr, 17.0)
         self.assertEqual(spot.dt, 1.28)
-        self.assertEqual(spot.freq_hz, 1300.0)
+        self.assertEqual(spot.audio_hz, 1300.0)
         self.assertEqual(spot.message, "K0C NI6CH 73")
 
     def test_status_lines_ignored(self):
@@ -93,7 +93,7 @@ class TestParseWsprdLine(unittest.TestCase):
         self.assertEqual(spot.mode, "wspr")
         self.assertEqual(spot.snr, -9.0)
         self.assertEqual(spot.dt, 1.1)
-        self.assertAlmostEqual(spot.freq_hz, 1446.0)
+        self.assertAlmostEqual(spot.audio_hz, 1446.0)
         self.assertEqual(spot.call, "ND6P")
         self.assertEqual(spot.grid, "DM04")
         self.assertEqual(spot.dbm, 30)

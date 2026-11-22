@@ -23,6 +23,7 @@ import json
 import select
 import socket
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Protocol
 
@@ -33,6 +34,9 @@ class GpsReport(Protocol):
 
     mode: int  # gpsd fix mode: 0/1 = no fix, 2 = 2D fix, 3 = 3D fix
     time: Optional[str]  # ISO8601 UTC timestamp string from the fix, or None
+    # Optional: lat/lon (degrees) and alt (meters MSL). A source that
+    # doesn't provide them (e.g. older test stubs) just never yields a
+    # position -- read with getattr(..., None) below.
 
 
 class GpsSource(Protocol):
@@ -40,9 +44,31 @@ class GpsSource(Protocol):
 
 
 class _TpvReport:
-    def __init__(self, mode: int, time: Optional[str]):
+    def __init__(
+        self,
+        mode: int,
+        time: Optional[str],
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+        alt: Optional[float] = None,
+    ):
         self.mode = mode
         self.time = time
+        self.lat = lat
+        self.lon = lon
+        self.alt = alt
+
+
+@dataclass(frozen=True)
+class GpsPosition:
+    """Receiver position from the last usable (mode >= 2) fix. alt is only
+    set on a 3D fix; fix_time is the GPS time the fix was reported at."""
+
+    lat: float
+    lon: float
+    alt: Optional[float]
+    mode: int
+    fix_time: datetime
 
 
 class GpsdSource:
@@ -104,7 +130,16 @@ class GpsdSource:
                 if obj.get("class") == "TPV":
                     latest = obj
                     break
-        return _TpvReport(mode=latest.get("mode", 0), time=latest.get("time"))
+        # gpsd >= 3.20 reports altMSL/altHAE; older versions only "alt"
+        # (MSL). Prefer MSL so the value means the same thing either way.
+        alt = latest.get("altMSL", latest.get("alt"))
+        return _TpvReport(
+            mode=latest.get("mode", 0),
+            time=latest.get("time"),
+            lat=latest.get("lat"),
+            lon=latest.get("lon"),
+            alt=alt,
+        )
 
 
 class GpsClock:
@@ -120,6 +155,7 @@ class GpsClock:
         self._lock = threading.Lock()
         self._offset: Optional[float] = None  # seconds, GPS - system, at last good fix
         self._last_fix_mode = 0
+        self._position: Optional[GpsPosition] = None
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -155,9 +191,25 @@ class GpsClock:
         if gps_dt.tzinfo is None:
             gps_dt = gps_dt.replace(tzinfo=timezone.utc)
         system_dt = datetime.now(timezone.utc)
+        lat, lon = getattr(report, "lat", None), getattr(report, "lon", None)
         with self._lock:
             self._offset = (gps_dt - system_dt).total_seconds()
+            if lat is not None and lon is not None:
+                self._position = GpsPosition(
+                    lat=float(lat),
+                    lon=float(lon),
+                    alt=getattr(report, "alt", None) if mode >= 3 else None,
+                    mode=mode,
+                    fix_time=gps_dt,
+                )
         return True
+
+    def last_position(self) -> Optional[GpsPosition]:
+        """Position from the most recent usable fix, or None if no fix with
+        a position has been seen yet. Never cleared on a later lost fix --
+        callers judge staleness from fix_time (hsd's rx_fix_age_s)."""
+        with self._lock:
+            return self._position
 
     def is_ready(self) -> bool:
         with self._lock:

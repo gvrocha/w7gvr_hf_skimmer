@@ -77,7 +77,8 @@ def cmd_status(args) -> None:
     print(f"listening: {obj['listening']}")
     print(f"mode:      {obj['mode']}")
     print(f"decoder:   {obj['decoder']}")
-    print(f"session:   {obj['session_seq']}")
+    print(f"band:      {obj.get('band')} (dial {obj.get('dial_hz')} Hz)")
+    print(f"session:   {obj['session_seq']} (started {obj.get('session_start')})")
     print(f"spots:     {obj['spot_count']}")
 
 
@@ -88,7 +89,8 @@ def cmd_monitor(args) -> None:
         event = obj.get("event")
         if event == "spot":
             d = obj["data"]
-            print(f"{d['utc_timestamp']}  {d['mode']:<4} {d['snr']:>5}  {d['freq_hz']:>9.1f} Hz  {d['message']}")
+            print(f"{d['cycle_utc']}  {d['band']:<4} {d['mode']:<4} {d['snr']:>5}  "
+                  f"{d['audio_hz']:>5} Hz  {d['message']}")
         elif event == "error":
             print(f"error: {obj.get('message')}", file=sys.stderr)
 

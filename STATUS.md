@@ -1,6 +1,6 @@
 # STATUS.md
 
-**Last updated:** 2026-09-26
+**Last updated:** 2026-11-22
 
 ## Where this stands right now
 
@@ -40,6 +40,7 @@ The remaining work before a reliable live station is getting an HF antenna perma
 
 ## In progress / next up
 
+- [x] Per-spot tagging + session-timestamped TSVs, HSD_VERSION 0.2 (2026-11-22): every decoded row now carries `cycle_utc` (`YYYY/MM/DD HH:MM:SS`, cycle start), `band`, `dial_hz`, `audio_hz` (offset in the 0–4000 Hz passband, renamed from `freq_hz`), `rf_hz`, and the receiver's own position from the latest GPS fix (`rx_lat`/`rx_lon`/`rx_alt_m`/`rx_grid`/`rx_fix_mode`/`rx_fix_age_s`); `call`/`grid` renamed `tx_call`/`tx_grid`. Session files are now `decodes_YYYYMMDD_HHMMSS_NNNN_hsd_v0.2.tsv` (start time from the GPS-disciplined clock, warning logged if no fix yet). Plan: `planning/20261122_spot_tagging_plan.md`. Also fixed `deploy.sh` overwriting the Pi's `.hsd_log_counter`/`config.json`/`hsd.sock` with the Mac's copies. Deployed to `minpi` and live on **15m FT8 (21.074 MHz)**, session 0019: decodes tagged correctly against a real 3D fix. 66 tests passing.
 - [ ] Track B-Radio: get an HF antenna permanently in place at the Pi's actual deployment location, run the Phase 1 exit criterion (sustained multi-hour real-signal capture verified against UTC boundaries) — capture mechanics and decode are now proven against real signal, live, end-to-end
 - [ ] The GPS unit's USB connection is unreliable (has disconnected/re-enumerated at least once) — worth a hardware look (cable, connector, power) before relying on it unattended for hours
 - [ ] FT991A/Lenovo head-to-head comparison (user's own existing radio + WSJT-X, run alongside the RTL-SDR chain) — would need `alsa-utils` added to the offline bundle (kernel-level USB-audio-class support is already confirmed present on `minimal_pi`'s image — the FT991A's audio interface already shows up as a real ALSA card); architecturally simple once hardware is available (no demod needed, just `arecord`-style raw capture feeding the same `CaptureWorker`/`align_chunks()` unchanged)

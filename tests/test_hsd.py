@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import hsd  # noqa: E402
 from decode_worker import Spot  # noqa: E402
+from gps_clock import GpsPosition  # noqa: E402
 
 
 class _StubDecodeWorker:
@@ -81,14 +82,23 @@ class _StubGpsClock:
 
     instances = []
 
-    def __init__(self, source):
+    def __init__(self, source, **kwargs):
         self.source = source
+        self.kwargs = kwargs
         self.started = False
+        self.ready = True
+        self.position = None
         self.fixed_timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
         _StubGpsClock.instances.append(self)
 
     def start(self):
         self.started = True
+
+    def is_ready(self):
+        return self.ready
+
+    def last_position(self):
+        return self.position
 
     def timestamp(self):
         return self.fixed_timestamp
@@ -121,6 +131,9 @@ class HsdTestCase(unittest.TestCase):
         hsd.GpsClock = _StubGpsClock
         hsd.config = dict(hsd.DEFAULT_CONFIG)
         hsd._session_seq = None
+        hsd._session_start = None
+        hsd._session_band = ""
+        hsd._session_dial_hz = None
         hsd._spot_count = 0
         hsd._decode_worker = None
         hsd._capture_worker = None
@@ -156,18 +169,76 @@ class HsdTestCase(unittest.TestCase):
         self.assertEqual(on_disk["mode"], "ft8")
         self.assertEqual(on_disk["listening"], True)
 
-    def test_spot_to_row_serializes_utc_timestamp(self):
-        spot = Spot(
+    def _ft8_spot(self):
+        return Spot(
             utc_timestamp=datetime(2026, 6, 24, 2, 48, 45, tzinfo=timezone.utc),
             mode="ft8",
             snr=2.0,
             dt=0.5,
-            freq_hz=1488.0,
+            audio_hz=1488.0,
             message="N8PFK WF3H RR73",
         )
-        row = hsd._spot_to_row(spot)
-        self.assertEqual(row["utc_timestamp"], "2026-06-24T02:48:45+00:00")
-        self.assertEqual(row["call"], "")
+
+    def test_spot_to_row_formats_cycle_utc(self):
+        row = hsd._spot_to_row(self._ft8_spot())
+        self.assertEqual(row["cycle_utc"], "2026/06/24 02:48:45")
+        self.assertEqual(row["tx_call"], "")
+        self.assertEqual(list(row.keys()), hsd.SPOT_TSV_FIELDS)
+
+    def test_spot_to_row_tags_band_dial_and_rf_frequency(self):
+        hsd._session_band = "15m"
+        hsd._session_dial_hz = 21074000
+        row = hsd._spot_to_row(self._ft8_spot())
+        self.assertEqual(row["band"], "15m")
+        self.assertEqual(row["dial_hz"], 21074000)
+        self.assertEqual(row["audio_hz"], 1488)
+        self.assertEqual(row["rf_hz"], 21075488)
+
+    def test_spot_to_row_blank_rx_fields_without_fix(self):
+        row = hsd._spot_to_row(self._ft8_spot(), position=None)
+        for key in ("rx_lat", "rx_lon", "rx_alt_m", "rx_grid", "rx_fix_mode", "rx_fix_age_s"):
+            self.assertEqual(row[key], "", key)
+
+    def test_spot_to_row_fills_rx_fields_from_position(self):
+        fix_time = datetime(2026, 6, 24, 2, 48, 50, tzinfo=timezone.utc)
+        position = GpsPosition(lat=47.612345, lon=-122.334567, alt=52.14, mode=3, fix_time=fix_time)
+        written_at = datetime(2026, 6, 24, 2, 49, 4, tzinfo=timezone.utc)
+        row = hsd._spot_to_row(self._ft8_spot(), position=position, written_at=written_at)
+        self.assertEqual(row["rx_lat"], "47.612345")
+        self.assertEqual(row["rx_lon"], "-122.334567")
+        self.assertEqual(row["rx_alt_m"], "52.1")
+        self.assertEqual(row["rx_grid"], "CN87to")
+        self.assertEqual(row["rx_fix_mode"], 3)
+        self.assertEqual(row["rx_fix_age_s"], 14)
+
+    def test_spot_to_row_2d_fix_has_blank_altitude(self):
+        fix_time = datetime(2026, 6, 24, 2, 48, 50, tzinfo=timezone.utc)
+        position = GpsPosition(lat=47.6, lon=-122.3, alt=None, mode=2, fix_time=fix_time)
+        row = hsd._spot_to_row(self._ft8_spot(), position=position, written_at=fix_time)
+        self.assertEqual(row["rx_alt_m"], "")
+        self.assertEqual(row["rx_fix_age_s"], 0)
+
+    def test_parse_frequency_hz_accepts_config_styles(self):
+        self.assertEqual(hsd.parse_frequency_hz("21074000"), 21074000)
+        self.assertEqual(hsd.parse_frequency_hz("14.074M"), 14074000)
+        self.assertEqual(hsd.parse_frequency_hz("14.095M"), 14095000)
+        self.assertEqual(hsd.parse_frequency_hz("14074k"), 14074000)
+        self.assertEqual(hsd.parse_frequency_hz(7074000), 7074000)
+        with self.assertRaises(ValueError):
+            hsd.parse_frequency_hz("twenty meters")
+
+    def test_session_filename_carries_start_timestamp(self):
+        clock = _StubGpsClock(source=None)
+        clock.fixed_timestamp = datetime(2026, 11, 22, 16, 19, 30, tzinfo=timezone.utc)
+        hsd._gps_clock = clock
+        hsd.config["band"] = "15m"
+        hsd.config["dial_frequency"] = "21074000"
+        hsd._init_session()
+        self.assertEqual(hsd._tsv_path.name, f"decodes_20261122_161930_0001_hsd_v{hsd.HSD_VERSION}.tsv")
+        self.assertEqual(hsd._session_band, "15m")
+        self.assertEqual(hsd._session_dial_hz, 21074000)
+        header = hsd._tsv_path.read_text().splitlines()[0].split("\t")
+        self.assertEqual(header, hsd.SPOT_TSV_FIELDS)
 
     def test_start_listening_creates_session_and_starts_worker(self):
         hsd.start_listening()
@@ -201,13 +272,20 @@ class HsdTestCase(unittest.TestCase):
         hsd.start_listening()
         spot = Spot(
             utc_timestamp=datetime(2026, 6, 24, 2, 48, 45, tzinfo=timezone.utc),
-            mode="ft8", snr=2.0, dt=0.5, freq_hz=1488.0, message="N8PFK WF3H RR73",
+            mode="ft8", snr=2.0, dt=0.5, audio_hz=1488.0, message="N8PFK WF3H RR73",
         )
+        clock = _StubGpsClock(source=None)
+        clock.position = GpsPosition(
+            lat=47.6, lon=-122.3, alt=None, mode=2,
+            fix_time=clock.fixed_timestamp,
+        )
+        hsd._gps_clock = clock
         hsd._on_spot(spot)
         self.assertEqual(hsd._spot_count, 1)
         rows = hsd._tsv_path.read_text().splitlines()
         self.assertEqual(len(rows), 2)  # header + one row
         self.assertIn("N8PFK WF3H RR73", rows[1])
+        self.assertIn("CN87", rows[1])  # rx_grid from the GPS clock's position
 
     def test_now_utc_falls_back_to_system_time_by_default(self):
         before = datetime.now(timezone.utc)

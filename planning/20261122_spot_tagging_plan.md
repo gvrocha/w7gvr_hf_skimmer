@@ -1,6 +1,6 @@
 # Spot tagging + session-timestamped TSV — implementation plan
 
-**Status:** proposed, 2026-11-22. Not started.
+**Status:** implemented and deployed to `minpi`, 2026-11-22 (HSD_VERSION 0.2). First live session: `decodes_20261122_163441_0019_hsd_v0.2.tsv`, 15m FT8. Two details changed from the original proposal while building it, both marked below.
 
 ## Goal
 
@@ -33,7 +33,7 @@ Band, dial frequency, and receiver position aren't recorded anywhere, so a TSV c
 | `rx_alt_m` | `52.1` | Blank unless the fix is 3D. |
 | `rx_grid` | `CN87ul` | 6-character Maidenhead from `rx_lat`/`rx_lon`. |
 | `rx_fix_mode` | `3` | gpsd mode (2 = 2D, 3 = 3D). Blank if no fix has ever been seen this daemon lifetime. |
-| `rx_fix_age_s` | `4` | Seconds between the fix time and `cycle_utc`. Lets a reader throw out rows whose position is stale (e.g. GPS dropped off USB mid-session, the failure mode documented in STATUS.md 2026-09-26). |
+| `rx_fix_age_s` | `4` | Seconds between the fix time and when the row was written. *(Changed from "relative to `cycle_utc`": the row is written about one cycle after `cycle_utc`, so measuring from write time always gives a non-negative, honest staleness.)* Lets a reader throw out rows whose position is stale (e.g. GPS dropped off USB mid-session, the failure mode documented in STATUS.md 2026-09-26). |
 
 If no fix has been seen yet, all `rx_*` columns are blank. The row is still written.
 
@@ -56,7 +56,7 @@ If no fix has been seen yet, all `rx_*` columns are blank. The row is still writ
    Extend `_TpvReport` with `lat`, `lon`, `alt` (gpsd's `altHAE` or `alt`, whichever is present).
    Have `GpsClock` store the last report with mode ≥ 2 alongside its time offset, and add `last_position()` returning `(lat, lon, alt, mode, fix_time)` or `None`.
    Same gpsd connection, no second socket.
-   `GpsClock` polls every 30 s (`fixed_interval`). That's fine for a station that stays put but too coarse for mobile use. If mobile matters, lower the interval or poll position separately; the fix age column makes staleness visible either way.
+   `GpsClock` polls every 30 s (`fixed_interval`) by default. *(Changed: `hsd` now passes `GPS_POLL_INTERVAL_S = 10`, so a spot's position is at most ~10 s old.)*
 2. **Move `_grid_square()`** from `tools/watch_decodes.py` into a shared `src/` module (e.g. `src/maidenhead.py`), extend it to 6 characters, and use it from both places.
 3. **`decode_worker.py`:** rename `Spot.freq_hz` → `audio_hz`. Nothing else changes; the band, dial, and receiver-location tags are session/daemon-level, not decoder output.
 4. **`hsd.py`:**

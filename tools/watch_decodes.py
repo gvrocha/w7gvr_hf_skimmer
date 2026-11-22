@@ -3,9 +3,12 @@
 
 Connects to hsd.sock (same broadcast stream hsctl monitor uses) and groups
 spot output into one block per decode window, with a header showing that
-window's real UTC time (from the spot's own GPS-disciplined utc_timestamp,
-not wall-clock-at-print-time) and the station's current grid square
-(polled fresh from gpsd for each new block).
+window's cycle_utc (GPS-disciplined, from the spot itself), band/dial
+frequency, and the receiver's own grid square and position.
+
+Every spot event already carries the receiver's position (rx_* fields,
+from hsd's own GpsClock), so this tool no longer opens a second gpsd
+connection of its own.
 
 Run with: python3 tools/watch_decodes.py
 """
@@ -15,58 +18,12 @@ import socket
 import sys
 
 HSD_SOCKET = "/root/w7gvr_hf_skimmer/hsd.sock"
-GPSD_HOST, GPSD_PORT = "127.0.0.1", 2947
 
 
-def _grid_square(lat: float, lon: float) -> str:
-    """6-character Maidenhead locator for (lat, lon)."""
-    lon, lat = lon + 180, lat + 90
-    a = ord("A")
-    field_lon, field_lat = int(lon // 20), int(lat // 10)
-    square_lon, square_lat = int((lon % 20) // 2), int(lat % 10)
-    subsq_lon = int(((lon % 20) % 2) * 12)
-    subsq_lat = int((lat % 1) * 24)
-    return "%c%c%d%d%c%c" % (
-        a + field_lon, a + field_lat, square_lon, square_lat,
-        chr(ord("a") + subsq_lon), chr(ord("a") + subsq_lat),
-    )
-
-
-class GpsdPoller:
-    """One persistent gpsd connection, polled on demand via gpsd's own
-    ?POLL; command -- returns the last cached fix instantly, no waiting
-    for a new report cycle."""
-
-    def __init__(self):
-        self._sock = None
-
-    def _ensure_connected(self):
-        if self._sock is not None:
-            return
-        try:
-            self._sock = socket.create_connection((GPSD_HOST, GPSD_PORT), timeout=2)
-            self._sock.settimeout(2)
-            self._sock.recv(4096)  # discard VERSION banner
-        except OSError:
-            self._sock = None
-
-    def location_str(self) -> str:
-        self._ensure_connected()
-        if self._sock is None:
-            return "location unknown (gpsd unreachable)"
-        try:
-            self._sock.sendall(b"?POLL;\n")
-            data = self._sock.recv(65536)
-            obj = json.loads(data.splitlines()[0])
-            tpv = obj.get("tpv") or []
-            fix = tpv[-1] if tpv else {}
-            if fix.get("mode", 0) < 2 or "lat" not in fix:
-                return "location unknown (no GPS fix)"
-            grid = _grid_square(fix["lat"], fix["lon"])
-            return f"{grid}  ({fix['lat']:.4f}, {fix['lon']:.4f})"
-        except (OSError, ValueError, IndexError, KeyError):
-            self._sock = None
-            return "location unknown (gpsd read error)"
+def _location_str(d: dict) -> str:
+    if not d.get("rx_grid"):
+        return "location unknown (no GPS fix yet)"
+    return f"{d['rx_grid']}  ({float(d['rx_lat']):.4f}, {float(d['rx_lon']):.4f})  fix age {d['rx_fix_age_s']}s"
 
 
 def main() -> None:
@@ -77,7 +34,6 @@ def main() -> None:
         print(f"error: cannot connect to {HSD_SOCKET} -- is hsd running?", file=sys.stderr)
         sys.exit(1)
 
-    gpsd = GpsdPoller()
     current_block = None
     buf = b""
 
@@ -97,11 +53,11 @@ def main() -> None:
                 if obj.get("event") != "spot":
                     continue
                 d = obj["data"]
-                block = d["utc_timestamp"]
+                block = d["cycle_utc"]
                 if block != current_block:
                     current_block = block
-                    print(f"\n\n===== {block}  UTC  |  {gpsd.location_str()} =====")
-                print(f"  {d['mode']:<4} {d['snr']:>6} dB  {d['freq_hz']:>9.1f} Hz  {d['message']}")
+                    print(f"\n\n===== {block} UTC  |  {d['band']} dial {d['dial_hz']} Hz  |  {_location_str(d)} =====")
+                print(f"  {d['mode']:<4} {d['snr']:>6} dB  {d['audio_hz']:>5} Hz  ({d['rf_hz']} Hz)  {d['message']}")
     except KeyboardInterrupt:
         print("\nstopped.")
 

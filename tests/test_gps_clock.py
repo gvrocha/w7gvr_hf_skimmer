@@ -24,6 +24,9 @@ TOLERANCE_SECONDS = 1.0
 class FakeReport:
     mode: int
     time: Optional[str]
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    alt: Optional[float] = None
 
 
 class StubGpsSource:
@@ -178,6 +181,37 @@ class TestRunLoop(unittest.TestCase):
             self.assertTrue(clock._thread.is_alive())
         finally:
             clock.stop()
+
+
+class TestLastPosition(unittest.TestCase):
+    def test_no_position_before_any_fix(self):
+        clock = GpsClock(StubGpsSource([FakeReport(mode=1, time=None)]))
+        clock.poll_once()
+        self.assertIsNone(clock.last_position())
+
+    def test_3d_fix_records_position_and_altitude(self):
+        t = "2026-11-22T16:19:56.000Z"
+        clock = GpsClock(StubGpsSource([FakeReport(mode=3, time=t, lat=47.6, lon=-122.3, alt=52.0)]))
+        self.assertTrue(clock.poll_once())
+        pos = clock.last_position()
+        self.assertEqual((pos.lat, pos.lon, pos.alt, pos.mode), (47.6, -122.3, 52.0, 3))
+        self.assertEqual(pos.fix_time, datetime(2026, 11, 22, 16, 19, 56, tzinfo=timezone.utc))
+
+    def test_2d_fix_drops_altitude(self):
+        t = "2026-11-22T16:19:56.000Z"
+        clock = GpsClock(StubGpsSource([FakeReport(mode=2, time=t, lat=47.6, lon=-122.3, alt=52.0)]))
+        clock.poll_once()
+        self.assertIsNone(clock.last_position().alt)
+
+    def test_position_survives_a_later_lost_fix(self):
+        t = "2026-11-22T16:19:56.000Z"
+        clock = GpsClock(StubGpsSource([
+            FakeReport(mode=3, time=t, lat=47.6, lon=-122.3, alt=52.0),
+            FakeReport(mode=1, time=None),
+        ]))
+        clock.poll_once()
+        clock.poll_once()
+        self.assertEqual(clock.last_position().lat, 47.6)
 
 
 if __name__ == "__main__":

@@ -69,7 +69,7 @@ class Spot:
     mode: str
     snr: float
     dt: float
-    freq_hz: float
+    audio_hz: float
     message: str
     call: Optional[str] = None
     grid: Optional[str] = None
@@ -100,7 +100,7 @@ def parse_jt9_line(line: str, day: date, mode: str) -> Optional[Spot]:
         mode=mode,
         snr=float(m["snr"]),
         dt=float(m["dt"]),
-        freq_hz=float(m["freq"]),
+        audio_hz=float(m["freq"]),
         message=m["msg"].strip(),
     )
 
@@ -117,7 +117,7 @@ def parse_decode_ft8_line(line: str, day: date, mode: str) -> Optional[Spot]:
         mode=mode,
         snr=float(m["snr"]),
         dt=float(m["dt"]),
-        freq_hz=float(m["freq"]),
+        audio_hz=float(m["freq"]),
         message=m["msg"].strip(),
     )
 
@@ -129,7 +129,7 @@ def parse_wsprd_line(line: str, day: date) -> Optional[Spot]:
     wsprd is invoked without -f (no dial frequency), so its "frequency"
     column is baseband-relative Hz -- same semantics as jt9/decode_ft8's
     freq column -- just printed as if it were an absolute frequency in MHz.
-    Convert back to Hz here so freq_hz means the same thing across all
+    Convert back to Hz here so audio_hz means the same thing across all
     three decoders.
     """
     parts = line.split()
@@ -142,7 +142,7 @@ def parse_wsprd_line(line: str, day: date) -> Optional[Spot]:
             mode="wspr",
             snr=float(snr),
             dt=float(dt),
-            freq_hz=float(freq_mhz) * 1e6,
+            audio_hz=float(freq_mhz) * 1e6,
             message=f"{call} {grid} {dbm}",
             call=call,
             grid=grid,

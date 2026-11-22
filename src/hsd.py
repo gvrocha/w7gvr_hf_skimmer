@@ -12,9 +12,10 @@ magd.sock shape rather than inventing a new one:
   Events (daemon -> client): {"event": <str>, ...}
     {"event": "ack", "message": <str>}
     {"event": "status", "listening": bool, "mode": str, "decoder": str,
-               "session_seq": str|null, "spot_count": int}
-    {"event": "spot", "data": {utc_timestamp, mode, snr, dt, freq_hz,
-               message, call, grid, dbm, drift}}
+               "band": str, "dial_hz": int|null,
+               "session_seq": str|null, "session_start": str|null,
+               "spot_count": int}
+    {"event": "spot", "data": {<one TSV row, keyed by SPOT_TSV_FIELDS>}}
     {"event": "error", "message": <str>}
 
 A "status" event is sent automatically to every client on connect. "spot"
@@ -35,6 +36,14 @@ boundaries from _now_utc(), which prefers the GPS-disciplined clock over
 the Pi's own RTC-less system clock -- if gpsd isn't reachable at startup,
 _start_gps_clock() logs a warning and _now_utc() falls back to plain
 system time, same free-running philosophy as GpsClock.timestamp() itself.
+
+Session TSVs (sessions/decodes_YYYYMMDD_HHMMSS_NNNN_hsd_v<ver>.tsv, the
+timestamp being the session's start time) carry one row per decoded
+message, tagged with the decode cycle's start (cycle_utc), the band/dial
+frequency it was heard on, its offset inside the audio passband
+(audio_hz) and absolute on-air frequency (rf_hz), and the receiver's own
+position from the latest GPS fix (rx_*). See
+planning/20261122_spot_tagging_plan.md for the column rationale.
 """
 
 import csv
@@ -44,6 +53,7 @@ import os
 import socket
 import sys
 import threading
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -52,6 +62,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from capture_worker import CaptureWorker, build_csdr_capture_cmd  # noqa: E402
 from decode_worker import DecodeWorker, Spot  # noqa: E402
 from gps_clock import GpsClock, GpsdSource  # noqa: E402
+from maidenhead import grid_square  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config" / "config.json"
@@ -61,7 +72,7 @@ SESSIONS_DIR = REPO_ROOT / "sessions"
 LOGS_DIR = REPO_ROOT / "logs"
 LOG_COUNTER_FILE = REPO_ROOT / ".hsd_log_counter"
 
-HSD_VERSION = "0.1"
+HSD_VERSION = "0.2"
 
 DEFAULT_CONFIG = {
     "band": "20m",
@@ -78,13 +89,26 @@ DEFAULT_CONFIG = {
 _RUNTIME_KEYS = {"listening"}
 
 SPOT_TSV_FIELDS = [
-    "utc_timestamp", "mode", "snr", "dt", "freq_hz", "message",
-    "call", "grid", "dbm", "drift",
+    "cycle_utc", "band", "dial_hz", "audio_hz", "rf_hz",
+    "mode", "snr", "dt", "message",
+    "tx_call", "tx_grid", "dbm", "drift",
+    "rx_lat", "rx_lon", "rx_alt_m", "rx_grid", "rx_fix_mode", "rx_fix_age_s",
 ]
+
+CYCLE_UTC_FORMAT = "%Y/%m/%d %H:%M:%S"
+SESSION_FILE_TIME_FORMAT = "%Y%m%d_%H%M%S"
+
+# How often GpsClock re-reads gpsd once it holds a fix. Also bounds how old
+# a spot's rx_* position can be (rx_fix_age_s), so shorter than
+# GpsClock's own 30s default.
+GPS_POLL_INTERVAL_S = 10.0
 
 config: dict = dict(DEFAULT_CONFIG)
 _session_seq: Optional[str] = None
 _tsv_path: Optional[Path] = None
+_session_start: Optional[datetime] = None
+_session_band: str = ""
+_session_dial_hz: Optional[int] = None
 _spot_count = 0
 _decode_worker: Optional[DecodeWorker] = None
 _capture_worker: Optional[CaptureWorker] = None
@@ -105,7 +129,7 @@ def _start_gps_clock() -> None:
     except OSError:
         _log.warning("gpsd unreachable at startup -- falling back to system clock for chunk timing")
         return
-    _gps_clock = GpsClock(source)
+    _gps_clock = GpsClock(source, fixed_interval=GPS_POLL_INTERVAL_S)
     _gps_clock.start()
 
 
@@ -113,6 +137,29 @@ def _now_utc() -> datetime:
     if _gps_clock is not None:
         return _gps_clock.timestamp()
     return datetime.now(timezone.utc)
+
+
+_FREQ_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([kKmMgG]?)\s*(?:[hH][zZ])?\s*$")
+_FREQ_SCALE = {"": 1, "k": 1e3, "m": 1e6, "g": 1e9}
+
+
+def parse_frequency_hz(value) -> int:
+    """Parse a dial frequency in any of the forms config.json uses --
+    '14074000', '14.074M', '14074k', 14074000 -- into integer Hz. The same
+    suffix style rtl_sdr -f itself accepts."""
+    if isinstance(value, (int, float)):
+        return int(round(value))
+    m = _FREQ_RE.match(str(value))
+    if not m:
+        raise ValueError(f"unparseable frequency: {value!r}")
+    return int(round(float(m[1]) * _FREQ_SCALE[m[2].lower()]))
+
+
+def _gps_position():
+    if _gps_clock is None:
+        return None
+    last_position = getattr(_gps_clock, "last_position", None)
+    return last_position() if last_position else None
 
 
 def _load_config() -> None:
@@ -146,34 +193,79 @@ def _next_log_seq() -> str:
     return f"{n:04d}"
 
 
-def _spot_to_row(spot: Spot) -> dict:
-    return {
-        "utc_timestamp": spot.utc_timestamp.isoformat(),
+def _blank(value):
+    return "" if value is None else value
+
+
+def _spot_to_row(spot: Spot, position=None, written_at: Optional[datetime] = None) -> dict:
+    """One TSV row / socket spot event for a decoded message.
+
+    position is a gps_clock.GpsPosition (or None if no fix has been seen
+    yet -- all rx_* columns are then blank). rx_fix_age_s is how old that
+    fix was at written_at (when the row was produced), not relative to
+    cycle_utc: the decode is written ~one cycle after cycle_utc, so this
+    is the honest "how stale is this position" number.
+    """
+    audio_hz = int(round(spot.audio_hz))
+    rf_hz = _session_dial_hz + audio_hz if _session_dial_hz is not None else None
+    row = {
+        "cycle_utc": spot.utc_timestamp.astimezone(timezone.utc).strftime(CYCLE_UTC_FORMAT),
+        "band": _session_band,
+        "dial_hz": _blank(_session_dial_hz),
+        "audio_hz": audio_hz,
+        "rf_hz": _blank(rf_hz),
         "mode": spot.mode,
         "snr": spot.snr,
         "dt": spot.dt,
-        "freq_hz": spot.freq_hz,
         "message": spot.message,
-        "call": spot.call or "",
-        "grid": spot.grid or "",
-        "dbm": spot.dbm if spot.dbm is not None else "",
-        "drift": spot.drift if spot.drift is not None else "",
+        "tx_call": spot.call or "",
+        "tx_grid": spot.grid or "",
+        "dbm": _blank(spot.dbm),
+        "drift": _blank(spot.drift),
+        "rx_lat": "", "rx_lon": "", "rx_alt_m": "", "rx_grid": "",
+        "rx_fix_mode": "", "rx_fix_age_s": "",
     }
+    if position is not None:
+        written_at = written_at or _now_utc()
+        row.update({
+            "rx_lat": f"{position.lat:.6f}",
+            "rx_lon": f"{position.lon:.6f}",
+            "rx_alt_m": f"{position.alt:.1f}" if position.alt is not None else "",
+            "rx_grid": grid_square(position.lat, position.lon),
+            "rx_fix_mode": position.mode,
+            "rx_fix_age_s": max(0, int(round((written_at - position.fix_time).total_seconds()))),
+        })
+    return row
 
 
 def _init_session() -> None:
-    global _session_seq, _tsv_path, _spot_count
+    global _session_seq, _tsv_path, _spot_count, _session_start, _session_band, _session_dial_hz
     _session_seq = _next_log_seq()
+    _session_start = _now_utc()
+    if _gps_clock is None or not _gps_clock.is_ready():
+        _log.warning(
+            "session %s starting without a GPS time fix -- filename timestamp %s "
+            "comes from the system clock and may be wrong",
+            _session_seq, _session_start.strftime(SESSION_FILE_TIME_FORMAT),
+        )
+    _session_band = config.get("band", "")
+    try:
+        _session_dial_hz = parse_frequency_hz(config["dial_frequency"])
+    except (KeyError, ValueError):
+        _log.warning("could not parse dial_frequency %r -- dial_hz/rf_hz will be blank",
+                     config.get("dial_frequency"))
+        _session_dial_hz = None
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    _tsv_path = SESSIONS_DIR / f"decodes_{_session_seq}_hsd_v{HSD_VERSION}.tsv"
+    stamp = _session_start.strftime(SESSION_FILE_TIME_FORMAT)
+    _tsv_path = SESSIONS_DIR / f"decodes_{stamp}_{_session_seq}_hsd_v{HSD_VERSION}.tsv"
     _spot_count = 0
     with open(_tsv_path, "w", newline="") as f:
         csv.DictWriter(f, fieldnames=SPOT_TSV_FIELDS, delimiter="\t").writeheader()
 
 
-def _write_spot_tsv(spot: Spot) -> None:
+def _write_spot_tsv(row: dict) -> None:
     with open(_tsv_path, "a", newline="") as f:
-        csv.DictWriter(f, fieldnames=SPOT_TSV_FIELDS, delimiter="\t").writerow(_spot_to_row(spot))
+        csv.DictWriter(f, fieldnames=SPOT_TSV_FIELDS, delimiter="\t").writerow(row)
 
 
 class _Client:
@@ -215,10 +307,11 @@ _clients = _ClientManager()
 
 def _on_spot(spot: Spot) -> None:
     global _spot_count
+    row = _spot_to_row(spot, position=_gps_position())
     with _state_lock:
         _spot_count += 1
-        _write_spot_tsv(spot)
-    _clients.broadcast({"event": "spot", "data": _spot_to_row(spot)})
+        _write_spot_tsv(row)
+    _clients.broadcast({"event": "spot", "data": row})
 
 
 def start_listening() -> None:
@@ -246,7 +339,10 @@ def start_listening() -> None:
         _capture_worker.start()
         config["listening"] = True
         _save_config()
-        _log.info("started session %s (mode=%s decoder=%s)", _session_seq, config["mode"], config["decoder"])
+        _log.info(
+            "started session %s (band=%s dial_hz=%s mode=%s decoder=%s) -> %s",
+            _session_seq, _session_band, _session_dial_hz, config["mode"], config["decoder"], _tsv_path.name,
+        )
 
 
 def stop_listening() -> None:
@@ -265,13 +361,23 @@ def stop_listening() -> None:
         _log.info("stopped session %s (%d spots)", _session_seq, _spot_count)
 
 
+def _safe_dial_hz() -> Optional[int]:
+    try:
+        return parse_frequency_hz(config.get("dial_frequency"))
+    except ValueError:
+        return None
+
+
 def _status_snapshot() -> dict:
     return {
         "event": "status",
         "listening": config["listening"],
         "mode": config["mode"],
         "decoder": config["decoder"],
+        "band": config.get("band", ""),
+        "dial_hz": _safe_dial_hz(),
         "session_seq": _session_seq,
+        "session_start": _session_start.strftime(SESSION_FILE_TIME_FORMAT) if _session_start else None,
         "spot_count": _spot_count,
     }
 
